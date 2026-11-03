@@ -93,7 +93,9 @@ Fans out the built-in fixed reviewer roles in parallel and returns structured fi
 - `timeout_ms`: per-worker timeout (default 1,200,000 = 20 min; min 1000). The kill ladder is SIGTERM then
   SIGKILL after 5s.
 - `codex_bin`: optional Codex binary path (else `CODEX_CLI_PATH`, else app-bundle candidates / bare `codex`).
-- `codex_home`: optional `CODEX_HOME` for child workers (else inherited; defaults to `~/.codex`).
+- `codex_home`: optional `CODEX_HOME` for child workers (else inherited; defaults to `~/.codex`). The run's
+  journaled state (`ultracode/runs/`, `ultracode/scripts/`) lives in the same home, so pass it to `status` /
+  `resume` too.
 
 Orchestration controls (all optional, all backward-compatible):
 
@@ -103,7 +105,8 @@ Orchestration controls (all optional, all backward-compatible):
 - `budget_tokens`: best-effort total token budget — a pre-spawn gate checked when a worker is admitted, with
   usage accounted after each worker completes. New workers are skipped (and the cap logged) once exceeded, but
   with concurrency N up to N in-flight workers may still finish past the budget. A soft cap, not a hard
-  per-token kill switch. Default `null` (unbounded); shared across all spawns in the run.
+  per-token kill switch. Default `null` (unbounded); shared across all spawns in the run. Native runs meter
+  total tokens; Claude-compatible scripts meter output tokens and `agent()` throws once the budget is spent.
 - `max_agents`: lifetime cap on spawned workers for the run (default 1000).
 
 Transient-retry knobs (retries fire **only** on classified transient errors — HTTP 429/5xx, rate-limit,
@@ -263,15 +266,16 @@ Script records also include a source snapshot:
 - `definition_ref`: saved-workflow identity when run through the one command's `@name` / `--workflow <name>`
   input.
 
-`resume_from_run_id` / `resumeFromRunId` enables explicit cached-call reuse for scripts. Completed prior
-`agent()` / `spawnWorker()` calls are reused only when the deterministic prompt+options cache key matches; changed
-calls spawn live workers. This is narrower than full arbitrary-JS step resume.
+`resume_from_run_id` / `resumeFromRunId` replays the **unchanged prefix** of `agent()` / `spawnWorker()` calls
+(Claude Workflow semantics). Each call is matched on its deterministic prompt+options cache key; the first call
+with no match — a new or edited call — ends the prefix, and it plus every call started after it runs live, even
+if an identical call exists in the prior journal (its inputs may have changed upstream). N identical calls
+replay N distinct journaled results. A `cache prefix ended at call-N` log event marks where live work began.
 
-Unlike Claude Code's in-process Workflow scripts, the body runs as a plain (un-sandboxed) `AsyncFunction`, so
-`Date.now()`, `Math.random()`, and `new Date()` work normally — there is **no** determinism restriction. The
-one consequence to know: because reuse is keyed on a prompt+options hash, any volatile value you bake into a
-worker's *prompt* (a timestamp, a random id) changes that key and forces a live re-run on resume. Keep volatile
-values out of prompts — or pass them through `args` — when you want resume cache hits.
+Native scripts run as a plain (un-sandboxed) `AsyncFunction`, so `Date.now()`, `Math.random()`, and
+`new Date()` work — but any volatile value baked into a worker's *prompt* changes its cache key and ends the
+resume prefix there. Keep volatile values out of prompts — or pass them through `args`. Claude-compatible
+scripts are stricter (below).
 
 ## Saved workflow definitions (`workflow list|show|save|update|delete`)
 
@@ -297,8 +301,20 @@ node scripts/ultracode-cli.js @deep-research --args '{"topic":"Codex"}'
 ```
 
 Running a saved definition (via `@name` / `--workflow <name>`), or any script with `--claude-compat`, turns on
-strict Claude-compat diagnostics and adapters before execution. In compat mode `agent()` without a `schema`
-returns the worker's final text (as Claude's Workflow does) instead of a `WORKER_SCHEMA` object. Allowed workflow primitive imports are rewritten to the bound runtime,
+strict Claude-compat diagnostics and adapters before execution, matching Claude's Workflow tool:
+
+- `agent()` without a `schema` returns the worker's final text instead of a `WORKER_SCHEMA` object.
+- The script runs in a fresh `node:vm` context with only ECMAScript built-ins and the bound primitives — no
+  `process`, `require`, timers, or `Buffer`. `Date.now()`, `Date()`, argless `new Date()`, and `Math.random()`
+  throw (they would break resume); `new Date(value)`, `Date.parse`, and `Date.UTC` work. The return value is
+  cloned out of the sandbox and must be structured-cloneable.
+- `budget` meters output tokens, and `agent()` throws once it is spent.
+- Claude-only options are reported in `record.warnings` (and a `claude-compat` log event): `agentType` has no
+  Codex equivalent and runs a default worker; a Claude `model` (`haiku`, `sonnet`, `opus`, `fable`,
+  `claude-*`) is dropped so the worker uses the Codex config's model. Codex model ids pass through.
+- An inline nested `workflow()` inherits compat mode.
+
+Allowed workflow primitive imports are rewritten to the bound runtime,
 `export async function run(context)` is invoked automatically, and direct workflow-side filesystem/shell/host
 access fails explicitly before workers spawn. The dashboard server also exposes definition
 list/show/save/update/delete/run endpoints, and the React UI shows the workflow library with source editing and

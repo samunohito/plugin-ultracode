@@ -36,6 +36,7 @@ const {
   sourceHash
 } = require("./claude-workflow-compat");
 const { transformSource } = require("./script-source-transform");
+const { compileSandboxedScript } = require("./workflow-sandbox");
 const { attachWorkflowUi, shouldLaunchUi } = require("./ultracode-ui-launcher");
 const workflowDefinitions = require("./workflow-definitions");
 
@@ -61,25 +62,29 @@ async function writeText(filePath, value) {
   await fs.writeFile(filePath, value.endsWith("\n") ? value : `${value}\n`, "utf8");
 }
 
-function scriptSnapshotPathFor(id) {
-  return path.join(path.dirname(engine.stateDir()), "scripts", `${id}.workflow.js`);
+function scriptSnapshotPathFor(id, home) {
+  return path.join(path.dirname(engine.stateDir(home)), "scripts", `${id}.workflow.js`);
 }
 
 async function readResumeRecord(input) {
   const id = input.resume_from_run_id || input.resumeFromRunId;
   if (!id) return null;
-  const record = await engine.readWorkflow({ workflow_id: id });
+  const record = await engine.readWorkflow({ workflow_id: id, codex_home: input.codex_home });
   if (!record || record.status === "missing") {
     throw new Error(`resume_from_run_id "${id}" was not found.`);
   }
   return record;
 }
 
+// cache_key -> completed prior workers with that key, in journal order. A list,
+// not a single entry, so N identical calls (e.g. 3 identical skeptics) replay N
+// distinct prior results instead of one result N times.
 function cacheableWorkerMap(record) {
   const out = new Map();
   for (const worker of (record && record.workers) || []) {
     if (!worker || worker.status !== "completed" || !worker.cache_key) continue;
-    out.set(worker.cache_key, worker);
+    if (!out.has(worker.cache_key)) out.set(worker.cache_key, []);
+    out.get(worker.cache_key).push(worker);
   }
   return out;
 }
@@ -166,6 +171,15 @@ function emitScriptEvent(ctx, event) {
 // AsyncFunction constructor (function scope, not a fresh global).
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 
+// Errors from a sandboxed (claude_compat) script belong to another realm, so
+// `instanceof Error` is false for them; read the message structurally.
+// Claude model ids and tier aliases (`claude-sonnet-…`, `haiku`, `opus`, …).
+const CLAUDE_MODEL_RE = /^(?:claude[-\w.]*|(?:us\.)?anthropic\.[-\w.:]+|haiku|sonnet|opus|fable)(?:\[1m\])?$/i;
+
+function errorMessage(error) {
+  return error && typeof error.message === "string" ? error.message : String(error);
+}
+
 // The ordered list of bound-scope parameter names. Kept as a single source of
 // truth so the function signature and the call arguments never drift apart.
 const SCOPE_PARAMS = [
@@ -220,6 +234,7 @@ function buildScope(ctx, input, hooks = {}) {
   // with `claude_compat`) expect agent() without a `schema` to return the
   // worker's final text, not the WORKER_SCHEMA object.
   const claudeCompat = Boolean(input.claude_compat || input.claudeCompat);
+  const warn = typeof hooks.warn === "function" ? hooks.warn : () => {};
 
   function normalizeWorkerOpts(opts = {}) {
     const normalized = { ...(opts || {}) };
@@ -232,7 +247,19 @@ function buildScope(ctx, input, hooks = {}) {
       }
       delete normalized.effort;
     }
-    if (claudeCompat && normalized.schema === undefined) normalized.schema = null;
+    if (claudeCompat) {
+      if (normalized.schema === undefined) normalized.schema = null;
+      // Claude subagent types and Claude models have no Codex counterpart. The
+      // closest Claude behavior is the default: a default worker on the session
+      // model, which here is the user's Codex config. Say so in the record.
+      if (normalized.agentType !== undefined) {
+        warn(`agentType "${normalized.agentType}" has no Codex equivalent; it ran as a default Codex worker.`);
+      }
+      if (typeof normalized.model === "string" && CLAUDE_MODEL_RE.test(normalized.model.trim())) {
+        warn(`model "${normalized.model}" is a Claude model; it ran on the model from the Codex config instead.`);
+        delete normalized.model;
+      }
+    }
     return normalized;
   }
 
@@ -246,7 +273,7 @@ function buildScope(ctx, input, hooks = {}) {
       ...normalizedOpts
     };
     const key = cacheKey({ kind: "spawnWorker", prompt, opts: callOpts });
-    const cached = typeof hooks.lookupCachedWorker === "function" ? hooks.lookupCachedWorker(key) : null;
+    const cached = typeof hooks.lookupCachedWorker === "function" ? hooks.lookupCachedWorker(key, callId) : null;
     if (cached && typeof hooks.recordCachedWorker === "function") {
       return hooks.recordCachedWorker(cached, {
         callId,
@@ -265,8 +292,14 @@ function buildScope(ctx, input, hooks = {}) {
 
   // agent(prompt, opts?) -> worker.value on completion, else null (the engine
   // already logged the failure). The ergonomic happy-path primitive.
+  // In claude_compat a spent token budget is a hard ceiling: like Claude's
+  // Workflow, agent() throws once the budget is exhausted (inside parallel()
+  // or pipeline() that still degrades the item to null).
   async function agent(prompt, opts = {}) {
     const record = await spawnWorker(prompt, opts);
+    if (claudeCompat && record && record.cap === "budget") {
+      throw new Error(`token budget exhausted (${ctx.budget.spent()} / ${ctx.budget.total} output tokens)`);
+    }
     return record && record.status === "completed" ? record.value : null;
   }
 
@@ -502,7 +535,9 @@ function buildScope(ctx, input, hooks = {}) {
       signal: ctx.signal,
       on_event: ctx.onEvent || undefined,
       codex_bin: spawnDefaults.codex_bin,
-      codex_home: spawnDefaults.codex_home
+      codex_home: spawnDefaults.codex_home,
+      // A Claude-compatible parent keeps Claude semantics in its children.
+      ...(claudeCompat ? { claude_compat: true } : {})
     };
     if (pathOrSource && typeof pathOrSource === "object") {
       Object.assign(nested, pathOrSource);
@@ -609,7 +644,7 @@ async function runScript(input = {}) {
 
   const identity = engine.workflowIdentity({ ...input, name: input.name || (meta && meta.name) }, "Script Run");
   const id = identity.id;
-  const scriptPath = scriptSnapshotPathFor(id);
+  const scriptPath = scriptSnapshotPathFor(id, input.codex_home);
   let record = null;
   let persister = null;
   let ctx = null;
@@ -624,6 +659,8 @@ async function runScript(input = {}) {
     workflowId: id,
     concurrency: input.concurrency,
     budgetTokens: input.budget_tokens,
+    // Claude's Workflow budget counts output tokens; the native one counts all.
+    budgetMetric: claudeCompat ? "output_tokens" : "total_tokens",
     maxAgents: input.max_agents,
     launchStaggerMs: input.launch_stagger_ms,
     depth: Number(process.env.ULTRACODE_DEPTH || 0),
@@ -657,7 +694,7 @@ async function runScript(input = {}) {
   });
 
   const startedAt = new Date().toISOString();
-  const statePath = engine.statePathFor(id);
+  const statePath = engine.statePathFor(id, input.codex_home);
 
   record = {
     id,
@@ -704,12 +741,36 @@ async function runScript(input = {}) {
   await attachWorkflowUi(record, ctx, input);
   if (record.ui) schedulePersist();
 
+  // Resume replays only the unchanged prefix of agent() calls (Claude Workflow
+  // semantics): the first call with no cached match — a new or edited call —
+  // closes the prefix, and it plus every call started after it runs live, even
+  // if an identical call exists in the prior journal. Upstream results may have
+  // changed by then, so a later identical prompt is not proof of an identical
+  // answer.
+  let cachePrefixOpen = resumeCache.size > 0;
+  const compatWarnings = [];
   const scope = buildScope(ctx, { ...input, cwd }, {
-    lookupCachedWorker(key) {
-      return resumeCache.get(key) || null;
+    warn(message) {
+      if (compatWarnings.includes(message)) return;
+      compatWarnings.push(message);
+      engine.log(ctx, message, { reason: "claude-compat" });
+    },
+    lookupCachedWorker(key, callId) {
+      if (!cachePrefixOpen) return null;
+      const matches = resumeCache.get(key);
+      if (matches && matches.length > 0) return matches.shift();
+      cachePrefixOpen = false;
+      engine.log(ctx, `script cache prefix ended at ${callId}; it and every later call run live`, {
+        reason: "script-cache-prefix-end",
+        cached_from_run_id: resumeRecord.id
+      });
+      return null;
     },
     recordCachedWorker(cached, metaForCache) {
-      const index = record.workers.length;
+      // Take the index from the same counter live workers use, or the next live
+      // worker would be assigned this slot and overwrite the cached record.
+      const index = ctx.nextWorkerIndex;
+      ctx.nextWorkerIndex += 1;
       const idForWorker = `worker-${index + 1}`;
       const cachedRecord = {
         index,
@@ -734,7 +795,7 @@ async function runScript(input = {}) {
           cache_opts_hash: cacheKey({ opts: metaForCache.opts })
         }
       };
-      record.workers.push(cachedRecord);
+      record.workers[index] = cachedRecord;
       engine.log(ctx, `script cache hit for ${metaForCache.callId}`, {
         reason: "script-cache-hit",
         cached_from_run_id: resumeRecord.id
@@ -764,7 +825,7 @@ async function runScript(input = {}) {
   // over-reports but never crashes.)
   const orphanRejections = [];
   const onUnhandledRejection = (reason) => {
-    orphanRejections.push(reason instanceof Error ? reason.message : String(reason));
+    orphanRejections.push(errorMessage(reason));
   };
   process.on("unhandledRejection", onUnhandledRejection);
 
@@ -773,15 +834,22 @@ async function runScript(input = {}) {
   let result = null;
   let error = null;
   try {
-    let fn;
-    try {
-      fn = new AsyncFunction(...SCOPE_PARAMS, transformSource(executionSource));
-    } catch (compileError) {
-      // SyntaxError from the AsyncFunction constructor.
-      throw compileError;
-    }
+    // A SyntaxError from either compiler propagates to the catch below.
+    const body = transformSource(executionSource);
+    const fn = claudeCompat
+      ? compileSandboxedScript(body, SCOPE_PARAMS, sourcePath || `${id}.workflow.js`)
+      : new AsyncFunction(...SCOPE_PARAMS, body);
     const callArgs = SCOPE_PARAMS.map((name) => scope[name]);
     result = await fn(...callArgs);
+    // A sandboxed script's return value is built from the sandbox realm's
+    // built-ins; clone it into the host realm so callers get ordinary objects.
+    if (claudeCompat && result !== undefined) {
+      try {
+        result = structuredClone(result);
+      } catch (cloneError) {
+        throw new Error(`script result is not serializable: ${errorMessage(cloneError)}`);
+      }
+    }
   } catch (runError) {
     error = runError;
   } finally {
@@ -801,7 +869,7 @@ async function runScript(input = {}) {
   if (error) {
     record.status = "failed";
     record.result = null;
-    record.error = error instanceof Error ? error.message : String(error);
+    record.error = errorMessage(error);
   } else {
     // agent() turns a failed worker into `null`, so a script can return
     // normally while some of its workers died. Surface that as 'partial'
@@ -816,12 +884,16 @@ async function runScript(input = {}) {
   // still 'completed' (its result is valid), but the leak is surfaced loudly as
   // a warning + a log event rather than silently swallowed.
   if (orphanRejections.length > 0) {
-    record.warnings = orphanRejections.map((message) => `unhandled promise rejection: ${message}`);
     for (const message of orphanRejections) {
       engine.log(ctx, `script emitted an unhandled promise rejection: ${message}`, { reason: "unhandled-rejection" });
     }
     record.events = ctx.events;
   }
+  const warnings = [
+    ...compatWarnings,
+    ...orphanRejections.map((message) => `unhandled promise rejection: ${message}`)
+  ];
+  if (warnings.length > 0) record.warnings = warnings;
 
   // Final write. Wrapped so a serialization failure (e.g. a non-JSON-able
   // script return value) still journals a useful failure instead of throwing

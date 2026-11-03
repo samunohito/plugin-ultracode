@@ -175,6 +175,7 @@ node scripts/ultracode-cli.js examples/parallel-reduce.workflow.js \
   --args '{"files":["a.js","b.js","c.js"]}'
 ```
 
-Generated run state lives under `$CODEX_HOME/ultracode/runs/`. Temporary
+Generated run state lives under `$CODEX_HOME/ultracode/runs/` (or the
+`--codex-home` directory when one is given). Temporary
 schemas, last-message files, and isolated worktrees are created under the OS
 temp directory and should not become tracked files.

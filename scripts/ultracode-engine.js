@@ -116,7 +116,10 @@ const VERDICT_SCHEMA = {
   required: ["refuted", "reason"]
 };
 
-function codexHome() {
+// An explicit `codex_home` (option / --codex-home) wins over $CODEX_HOME, so a
+// run's workers AND its journaled state live in the same home.
+function codexHome(override) {
+  if (typeof override === "string" && override.trim()) return override.trim();
   if (process.env.CODEX_HOME && process.env.CODEX_HOME.trim()) {
     return process.env.CODEX_HOME.trim();
   }
@@ -149,12 +152,12 @@ function defaultCodexBin() {
   return "codex";
 }
 
-function stateDir() {
-  return path.join(codexHome(), "ultracode", "runs");
+function stateDir(home) {
+  return path.join(codexHome(home), "ultracode", "runs");
 }
 
-function statePathFor(id) {
-  return path.join(stateDir(), `${id}.json`);
+function statePathFor(id, home) {
+  return path.join(stateDir(home), `${id}.json`);
 }
 
 function assertNonEmptyString(value, name) {
@@ -257,17 +260,17 @@ async function readJson(filePath) {
   return JSON.parse(await fs.readFile(filePath, "utf8"));
 }
 
-async function latestStatePath() {
+async function latestStatePath(home) {
   let entries;
   try {
-    entries = await fs.readdir(stateDir(), { withFileTypes: true });
+    entries = await fs.readdir(stateDir(home), { withFileTypes: true });
   } catch (error) {
     if (error.code === "ENOENT") return null;
     throw error;
   }
   const files = entries
     .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
-    .map((entry) => path.join(stateDir(), entry.name));
+    .map((entry) => path.join(stateDir(home), entry.name));
   if (files.length === 0) return null;
   const stats = await Promise.all(files.map(async (file) => ({ file, stat: await fs.stat(file) })));
   stats.sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
@@ -279,9 +282,9 @@ async function readWorkflow(input = {}) {
   if (input.state_path) {
     filePath = path.resolve(assertNonEmptyString(input.state_path, "state_path"));
   } else if (input.workflow_id) {
-    filePath = statePathFor(assertNonEmptyString(input.workflow_id, "workflow_id"));
+    filePath = statePathFor(assertNonEmptyString(input.workflow_id, "workflow_id"), input.codex_home);
   } else {
-    filePath = await latestStatePath();
+    filePath = await latestStatePath(input.codex_home);
   }
   if (!filePath) {
     return { status: "missing", message: "No Ultracode workflow state exists yet." };
@@ -405,6 +408,9 @@ function createContext(opts = {}) {
     opts.budgetTokens === undefined || opts.budgetTokens === null || opts.budgetTokens === ""
       ? null
       : Math.max(0, Math.floor(Number(opts.budgetTokens)));
+  // Which usage counter the budget meters: "total_tokens" (default) or
+  // "output_tokens" (Claude Workflow semantics, used by claude_compat scripts).
+  const budgetMetric = opts.budgetMetric === "output_tokens" ? "output_tokens" : "total_tokens";
   const launchStaggerMs = clampNonNegInt(
     firstDefined(opts.launchStaggerMs, opts.launch_stagger_ms, process.env.ULTRACODE_LAUNCH_STAGGER_MS),
     DEFAULT_LAUNCH_STAGGER_MS
@@ -436,8 +442,8 @@ function createContext(opts = {}) {
     signal: controller.signal,
     budget: {
       total: budgetTotal,
-      spent: () => usageTotals.total_tokens,
-      remaining: () => (budgetTotal === null ? Infinity : Math.max(0, budgetTotal - usageTotals.total_tokens))
+      spent: () => usageTotals[budgetMetric] || 0,
+      remaining: () => (budgetTotal === null ? Infinity : Math.max(0, budgetTotal - (usageTotals[budgetMetric] || 0)))
     }
   };
   ctx.cancelled = () => controller.signal.aborted;
@@ -1300,7 +1306,7 @@ async function spawnWorkerGuarded(prompt, opts, ctx, resumeSessionId = null) {
   const capExceeded = () => {
     if (ctx && ctx.budget.total !== null && ctx.budget.remaining() <= 0) {
       log(ctx, `Skipping worker "${label}": token budget exhausted.`, { label, reason: "budget" });
-      return failedWorker(label, phase, "token budget exhausted");
+      return { ...failedWorker(label, phase, "token budget exhausted"), cap: "budget" };
     }
     if (ctx && ctx.spawnedCount >= ctx.maxAgents) {
       log(ctx, `Skipping worker "${label}": lifetime agent cap (${ctx.maxAgents}) reached.`, {
@@ -2215,7 +2221,7 @@ async function runExplicitWorkflow(input) {
       ...retryOpts.journal,
       ...transportJournal(transport, transportStrict)
     },
-    state_path: statePathFor(id),
+    state_path: statePathFor(id, input.codex_home),
     phases: Array.from(new Set(specs.map((spec) => spec.phase).filter(Boolean))),
     workers: specs.map((spec) => ({
       index: spec.index,
@@ -2329,7 +2335,7 @@ async function runWorkflow(input = {}) {
       ...retryOpts.journal,
       ...transportJournal(options.transport, options.transport_strict)
     },
-    state_path: statePathFor(id),
+    state_path: statePathFor(id, input.codex_home),
     workers: selectRoles(options.workers).map((worker) => ({
       ...worker,
       step_id: stepId({ kind: "role", role: worker.id, index: worker.index }),
@@ -2369,7 +2375,11 @@ async function runWorkflow(input = {}) {
 // Journaled resume: reload a persisted record, keep completed steps, and only
 // re-spawn missing / failed / explicitly-forced steps, then re-aggregate.
 async function resumeWorkflow(input = {}) {
-  const record = await readWorkflow({ workflow_id: input.workflow_id, state_path: input.state_path });
+  const record = await readWorkflow({
+    workflow_id: input.workflow_id,
+    state_path: input.state_path,
+    codex_home: input.codex_home
+  });
   if (!record || record.status === "missing") {
     throw new Error("No Ultracode workflow state to resume.");
   }
@@ -3066,7 +3076,7 @@ async function runPipelineSpec(input = {}) {
       ...retryOpts.journal,
       ...transportJournal(transport, transportStrict)
     },
-    state_path: statePathFor(id),
+    state_path: statePathFor(id, input.codex_home),
     phases: Array.from(new Set(compiled.map((s) => s.phase).filter(Boolean))),
     steps: stepRecords,
     workers: stepRecords,

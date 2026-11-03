@@ -186,7 +186,8 @@ async function workflowCommand(options) {
     if (!source && (options.workflow_id || options.state_path || options.from_workflow_id)) {
       const record = await engine.readWorkflow({
         workflow_id: options.from_workflow_id || options.workflow_id,
-        state_path: options.state_path
+        state_path: options.state_path,
+        codex_home: options.codex_home
       });
       if (!record || record.status === "missing") throw new Error("No workflow record found to save.");
       const scriptPath = record.script_path || record.source_path;

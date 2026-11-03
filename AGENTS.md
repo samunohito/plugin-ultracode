@@ -21,7 +21,7 @@ Ultracode is a Codex CLI plugin that gives Codex a parallel worker orchestration
 
 ## Runtime Behavior
 
-Ultracode workers are real Codex subprocesses, not mocked agents. Worker output is schema-validated when a schema is provided, usage is aggregated from Codex JSON events, and workflow state is written under `$CODEX_HOME/ultracode/runs/`.
+Ultracode workers are real Codex subprocesses, not mocked agents. Worker output is schema-validated when a schema is provided, usage is aggregated from Codex JSON events, and workflow state is written under `<codex home>/ultracode/runs/` — the `codex_home` option when given, else `$CODEX_HOME` (default `~/.codex`).
 
 Temporary schemas, last-message files, and isolated worktrees are created under the OS temp directory. They should not create tracked files in this repository.
 
