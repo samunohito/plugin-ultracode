@@ -129,3 +129,31 @@ workflow authors, and plugin development:
 - [skills/ultracode/references/quality-patterns.md](skills/ultracode/references/quality-patterns.md) for verification patterns.
 - [skills/ultracode/references/cookbook.md](skills/ultracode/references/cookbook.md) for workflow recipes.
 - [skills/ultracode/references/cli.md](skills/ultracode/references/cli.md) for the complete technical reference.
+
+## Workflow state storage
+
+Run journals default to `<workflow cwd>/.codex/ultracode/runs/`; script source
+snapshots live beside them in `scripts/`, and dashboard metadata in `ui/`.
+Add `/.codex/ultracode/` to your project's `.gitignore` to exclude generated state.
+Set the engine `state_dir` option, CLI `--state-dir`, or `ULTRACODE_STATE_DIR`
+to select another root (precedence: explicit option > environment > cwd default).
+Relative roots resolve against the workflow's cwd. Records persist an absolute
+`state_dir`; status, resume, nested scripts, and the dashboard share that root.
+
+`codex_home` / `--codex-home` and `CODEX_HOME` still select worker authentication
+and configuration. State storage never changes a worker's `CODEX_HOME`. Saved
+named workflow definitions may remain in `$CODEX_HOME/ultracode/workflows/`;
+these reusable definitions are separate from per-run script snapshots. Plugin
+update stamps also remain in Codex home.
+
+Old journals are not automatically migrated. Read or resume them by selecting
+their old root, for example:
+
+```sh
+node scripts/ultracode-cli.js status --state-dir "$HOME/.codex/ultracode"
+node scripts/ultracode-cli.js resume --state-dir "$HOME/.codex/ultracode" --workflow-id RUN_ID
+node scripts/ultracode-cli.js status --state-path /absolute/path/to/runs/RUN_ID.json
+```
+
+An explicit `--state-path` works from another cwd and binds writes and dashboard
+lookup to the opened journal's root, including legacy or copied journals.

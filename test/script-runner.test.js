@@ -493,7 +493,7 @@ test("script status file updates with live events and pending workers mid-flight
       })
     );
     let mid = null;
-    const runsDir = path.join(home, "ultracode", "runs");
+    const runsDir = engine.stateDir();
     for (let i = 0; i < 40; i += 1) {
       await new Promise((resolve) => setTimeout(resolve, 20));
       let files = [];

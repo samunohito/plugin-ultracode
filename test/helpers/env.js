@@ -64,15 +64,18 @@ function readInvocations(sessionDir) {
     .map((l) => JSON.parse(l));
 }
 
-// Sandbox CODEX_HOME into a temp dir so journaled-state tests never touch
-// ~/.codex. stateDir() = $CODEX_HOME/ultracode/runs (confirmed isolatable).
+// Isolate authentication and workflow state independently.
 async function withCodexHome(fn) {
   const prev = process.env.CODEX_HOME;
+  const previousState = process.env.ULTRACODE_STATE_DIR;
   const dir = freshTmpDir("ultracode-home-");
   process.env.CODEX_HOME = dir;
+  process.env.ULTRACODE_STATE_DIR = path.join(dir, "state");
   try {
     return await fn(dir);
   } finally {
+    if (previousState === undefined) delete process.env.ULTRACODE_STATE_DIR;
+    else process.env.ULTRACODE_STATE_DIR = previousState;
     if (prev === undefined) delete process.env.CODEX_HOME;
     else process.env.CODEX_HOME = prev;
     fs.rmSync(dir, { recursive: true, force: true });

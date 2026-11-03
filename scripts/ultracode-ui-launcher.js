@@ -89,6 +89,7 @@ async function startServer(runsDir, metaPath, input = {}) {
   const env = {
     ...process.env,
     ULTRACODE_UI_RUNS_DIR: runsDir,
+    ...(input.codex_home ? { CODEX_HOME: input.codex_home } : {}),
     ULTRACODE_UI_META_PATH: metaPath,
     ULTRACODE_UI_HOST: typeof input.ui_host === "string" && input.ui_host.trim() ? input.ui_host.trim() : DEFAULT_HOST,
     ULTRACODE_UI_PORT:

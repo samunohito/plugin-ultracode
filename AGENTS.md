@@ -21,7 +21,9 @@ Ultracode is a Codex CLI plugin that gives Codex a parallel worker orchestration
 
 ## Runtime Behavior
 
-Ultracode workers are real Codex subprocesses, not mocked agents. Worker output is schema-validated when a schema is provided, usage is aggregated from Codex JSON events, and workflow state is written under `<codex home>/ultracode/runs/` — the `codex_home` option when given, else `$CODEX_HOME` (default `~/.codex`).
+Ultracode workers are real Codex subprocesses, not mocked agents. Worker output is schema-validated when a schema is provided, usage is aggregated from Codex JSON events, and workflow state defaults to `<workflow cwd>/.codex/ultracode/runs/`, with run script snapshots in the sibling `scripts/` directory. `state_dir` / `--state-dir` overrides `ULTRACODE_STATE_DIR`, which overrides the cwd default; relative roots resolve against workflow cwd. Records persist an absolute `state_dir`, shared by status/resume/UI and nested scripts. Explicit `state_path` rebinds the record to the opened journal and its root.
+
+`codex_home` / `CODEX_HOME` selects worker configuration/authentication, never state storage. Saved named workflow definitions and updater stamps remain in Codex home. To read old journals, explicitly set `state_dir` to the old `<codex home>/ultracode`; no automatic migration occurs.
 
 Temporary schemas, last-message files, and isolated worktrees are created under the OS temp directory. They should not create tracked files in this repository.
 
@@ -31,10 +33,10 @@ The Workflow-script runner executes scripts in-process through the CLI. Do not a
 
 The suite runs entirely offline against a mock Codex binary. Tests must never call the real, paid `codex` CLI.
 
-- Run everything with `npm test`. It preloads `test/helpers/isolate-codex-home.js`, which points `CODEX_HOME` at a temp dir so run state never lands in the real `~/.codex`.
+- Run everything with `npm test`. It preloads `test/helpers/isolate-codex-home.js`, which isolates `CODEX_HOME` and `ULTRACODE_STATE_DIR` in temp directories.
 - Run a single file with `node --test --require ./test/helpers/isolate-codex-home.js test/<file>.test.js`.
 - `test/fixtures/mock-codex.js` is the env-driven stand-in for `codex`.
-- Always set `CODEX_HOME` to a temp dir and point `CODEX_CLI_PATH` or `codex_bin` at the mock when running examples or tests.
+- Always set `CODEX_HOME` and `ULTRACODE_STATE_DIR` to temp directories and point `CODEX_CLI_PATH` or `codex_bin` at the mock when running examples or tests.
 
 ## Development Notes
 

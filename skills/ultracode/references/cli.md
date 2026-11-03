@@ -95,9 +95,16 @@ Fans out the built-in fixed reviewer roles in parallel and returns structured fi
 - `timeout_ms`: per-worker timeout (default 1,200,000 = 20 min; min 1000). The kill ladder is SIGTERM then
   SIGKILL after 5s.
 - `codex_bin`: optional Codex binary path (else `CODEX_CLI_PATH`, else app-bundle candidates / bare `codex`).
-- `codex_home`: optional `CODEX_HOME` for child workers (else inherited; defaults to `~/.codex`). The run's
-  journaled state (`ultracode/runs/`, `ultracode/scripts/`) lives in the same home, so pass it to `status` /
-  `resume` too.
+- `codex_home` / `--codex-home`: worker authentication/configuration home (else `CODEX_HOME`, default `~/.codex`). It does not select journal storage.
+- `state_dir` / `--state-dir`: workflow state root, ahead of `ULTRACODE_STATE_DIR`, then
+  `<workflow cwd>/.codex/ultracode/`. Relative roots resolve against workflow cwd.
+  Journals live in `runs/`, per-run source snapshots in `scripts/`, dashboard metadata in `ui/`.
+  Records persist an absolute `state_dir`; status/resume/latest and nested scripts use that root.
+  `--state-path /absolute/path/to/runs/ID.json` works from other directories and pins the
+  loaded record's root, even for copied or legacy journals.
+  Old journals require `--state-dir <old codex home>/ultracode`; no automatic migration occurs.
+  Saved named definitions in `$CODEX_HOME/ultracode/workflows/` and updater stamps remain
+  in Codex home and are separate from per-run snapshots.
 
 Orchestration controls (all optional, all backward-compatible):
 
@@ -266,7 +273,7 @@ the dynamic worker records spawned by `agent`, `spawnWorker`, `loopUntilDry`, an
 
 Script records also include a source snapshot:
 
-- `script_path`: the saved source copy under `$CODEX_HOME/ultracode/scripts/`.
+- `script_path`: the saved source copy under `<state_dir>/scripts/`.
 - `source_path`: the original path when run from a file.
 - `source_hash`: SHA-256 of the script source.
 - `meta`: parsed Claude-style `export const meta = { name, description, phases }` when present. Keep each

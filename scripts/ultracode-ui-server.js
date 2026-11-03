@@ -154,9 +154,6 @@ async function listWorkflows() {
 
 function codexHomeForSessions() {
   if (process.env.CODEX_HOME) return path.resolve(process.env.CODEX_HOME);
-  if (path.basename(runsDir) === "runs" && path.basename(path.dirname(runsDir)) === "ultracode") {
-    return path.dirname(path.dirname(runsDir));
-  }
   return path.join(process.env.HOME || process.cwd(), ".codex");
 }
 
@@ -373,6 +370,7 @@ async function handle(req, res) {
       cwd: body.cwd || context.cwd,
       codex_bin: body.codex_bin,
       codex_home: body.codex_home,
+      state_dir: path.dirname(runsDir),
       concurrency: body.concurrency,
       budget_tokens: body.budget_tokens,
       max_agents: body.max_agents,
