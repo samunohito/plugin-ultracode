@@ -112,13 +112,17 @@ Orchestration controls (all optional, all backward-compatible):
 - `max_agents`: lifetime cap on spawned workers for the run (default 1000).
 
 Transient-retry knobs (retries fire **only** on classified transient errors — HTTP 429/5xx, rate-limit,
-network errno, or transient auth-refresh races — never on login-required/bad-credential/bad-flag/schema/timeout/unknown failures):
+network errno, model-capacity errors, or transient auth-refresh races — never on login-required/bad-credential/bad-flag/schema/timeout/unknown failures):
 
-- `max_retries`: per-worker transient retries. Default `0` (byte-identical to the pre-retry engine).
+- `max_retries`: per-worker generic transient retries. Default `0`; narrow implicit retries below still apply.
 - `base_delay_ms`: base backoff delay. Default `500`.
 - `max_delay_ms`: backoff cap. Default `30000`.
 - `retry_jitter`: full-jitter in `[0, min(max, base*2^attempt)]`. Default `true`.
 - Transient auth-refresh races get one implicit restart even when `max_retries` is `0`.
+- `Selected model is at capacity` failures get up to two implicit retries, using the same
+  backoff settings, even when `max_retries` is `0`. A larger `max_retries` increases that
+  budget. Retries retain the selected model, respect cancellation and run caps, and emit
+  `worker.retry` events; persistent failures remain failed after the budget is exhausted.
 
 Schema-mismatch retries are a separate counter (default `1` when a schema is set, else `0`) and never consume
 the transient-retry budget.
