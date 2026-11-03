@@ -5,7 +5,18 @@ const assert = require("node:assert");
 const path = require("path");
 const fs = require("fs");
 
-const { engine, MOCK, MOCK_FAIL, freshCounterPath, freshTmpDir, withCodexCliPath, withCodexHome, withMockEnv } = require("./helpers/env.js");
+const {
+  engine,
+  MOCK,
+  MOCK_FAIL,
+  freshCounterPath,
+  freshSessionDir,
+  freshTmpDir,
+  readInvocations,
+  withCodexCliPath,
+  withCodexHome,
+  withMockEnv
+} = require("./helpers/env.js");
 const { runScript, transformSource } = require("../scripts/ultracode-script-runner.js");
 
 const ECHO_FIXTURE = path.join(__dirname, "fixtures", "echo.workflow.js");
@@ -151,7 +162,8 @@ test("agent() returns null on a failed worker (mock-codex-fail) — failure alre
     // Point this run's spawns at the deliberately-failing mock.
     ...baseOpts({ codex_bin: MOCK_FAIL })
   });
-  assert.strictEqual(rec.status, "completed", "the SCRIPT still completes even though the agent failed");
+  assert.strictEqual(rec.status, "partial", "the script returns normally but its failed worker is surfaced");
+  assert.strictEqual(rec.failed_workers, 1);
   assert.strictEqual(rec.result.isNull, true, "agent() resolves to null on worker failure");
 });
 
@@ -170,7 +182,8 @@ test("parallel() over a mixed batch: filter(Boolean) keeps only the successes", 
     args: { failBin: MOCK_FAIL },
     ...baseOpts()
   });
-  assert.strictEqual(rec.status, "completed");
+  assert.strictEqual(rec.status, "partial", "one failed worker marks the run partial");
+  assert.strictEqual(rec.failed_workers, 1);
   assert.strictEqual(rec.result.total, 3, "all three thunks resolved (failures -> null, not a throw)");
   assert.strictEqual(rec.result.kept, 2, "filter(Boolean) drops the one failed agent");
 });
@@ -618,4 +631,51 @@ test("orphan promise rejection: host survives (child process), warning recorded"
   assert.deepStrictEqual(parsed.result, { ok: true });
   assert.ok(Array.isArray(parsed.warnings) && parsed.warnings.length >= 1, "a warning is recorded");
   assert.match(parsed.warnings[0], /unhandled promise rejection: boom-orphan/);
+});
+
+// ---------------------------------------------------------------------------
+// Claude Workflow compatibility of the agent() surface.
+// ---------------------------------------------------------------------------
+
+test("claude_compat: agent() without a schema returns the worker's final text", async () => {
+  const rec = await withMockEnv({ MOCK_CODEX_RESPONSE: "misskey" }, () =>
+    runScript({
+      source: "const v = await agent('read the name'); return { type: typeof v, v };",
+      claude_compat: true,
+      ...baseOpts()
+    })
+  );
+  assert.strictEqual(rec.status, "completed");
+  assert.deepStrictEqual(rec.result, { type: "string", v: "misskey" });
+});
+
+test("claude_compat: an explicit schema is still honored", async () => {
+  const rec = await runScript({
+    source: "const v = await agent('inspect', { schema: WORKER_SCHEMA }); return typeof v;",
+    claude_compat: true,
+    ...baseOpts()
+  });
+  assert.strictEqual(rec.result, "object");
+});
+
+test("agent() maps the Claude `effort` option onto reasoning_effort", async () => {
+  const sessionDir = freshSessionDir();
+  const rec = await withMockEnv({ MOCK_CODEX_SESSION_DIR: sessionDir }, () =>
+    runScript({
+      source:
+        "await agent('cheap', { schema: null, effort: 'low' });" +
+        "await agent('explicit wins', { schema: null, effort: 'low', reasoning_effort: 'high' });" +
+        "return true;",
+      ...baseOpts()
+    })
+  );
+  assert.strictEqual(rec.status, "completed");
+  const argvs = readInvocations(sessionDir).map(({ argv }) => argv);
+  assert.strictEqual(argvs.length, 2);
+  assert.ok(argvs.some((argv) => argv.includes('model_reasoning_effort="low"')), "effort reached Codex");
+  assert.ok(argvs.some((argv) => argv.includes('model_reasoning_effort="high"')), "reasoning_effort wins over effort");
+  assert.deepStrictEqual(
+    rec.workers.map((worker) => worker.spec && worker.spec.reasoning_effort).sort(),
+    ["high", "low"]
+  );
 });

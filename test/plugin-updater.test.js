@@ -96,12 +96,17 @@ test("updatePlugin refreshes the marketplace snapshot before reinstalling Ultrac
   ]);
 });
 
-test("auto-update runs by default before a command, never changes its stdout, and is throttled", async () => {
+test("opted-in auto-update runs before a command, never changes its stdout, and is throttled", async () => {
   const dir = freshTmpDir("ultracode-auto-update-cli-");
   const logPath = path.join(dir, "codex-plugin.log");
-  // CODEX_HOME=dir keeps the throttle stamp in a fresh dir; ULTRACODE_NO_AUTO_UPDATE="0"
-  // explicitly enables auto-update regardless of the outer shell env.
-  const env = { CODEX_HOME: dir, MOCK_CODEX_PLUGIN_LOG: logPath, ULTRACODE_NO_AUTO_UPDATE: "0" };
+  // CODEX_HOME=dir keeps the throttle stamp in a fresh dir; ULTRACODE_AUTO_UPDATE="1"
+  // opts in and ULTRACODE_NO_AUTO_UPDATE="0" neutralizes an outer-shell opt-out.
+  const env = {
+    CODEX_HOME: dir,
+    MOCK_CODEX_PLUGIN_LOG: logPath,
+    ULTRACODE_AUTO_UPDATE: "1",
+    ULTRACODE_NO_AUTO_UPDATE: "0"
+  };
 
   // First run: no throttle stamp yet -> the updater runs before the command.
   const first = await runCli(["workflow", "list", "--codex-bin", MOCK_CODEX_PLUGIN, "--cwd", dir], env);
@@ -127,6 +132,22 @@ test("ULTRACODE_NO_AUTO_UPDATE=1 disables the auto-update entirely", async () =>
     CODEX_HOME: dir,
     MOCK_CODEX_PLUGIN_LOG: logPath,
     ULTRACODE_NO_AUTO_UPDATE: "1"
+  });
+
+  assert.strictEqual(code, 0, `cli exited 0 (stderr: ${stderr})`);
+  assert.strictEqual(JSON.parse(stdout).kind, "workflow_definitions");
+  assert.doesNotMatch(stderr, /auto-update/);
+  assert.strictEqual(fs.existsSync(logPath), false, "the updater never ran");
+});
+
+test("auto-update never runs unless opted in", async () => {
+  const dir = freshTmpDir("ultracode-default-no-auto-update-cli-");
+  const logPath = path.join(dir, "codex-plugin.log");
+  const { code, stdout, stderr } = await runCli(["workflow", "list", "--codex-bin", MOCK_CODEX_PLUGIN, "--cwd", dir], {
+    CODEX_HOME: dir,
+    MOCK_CODEX_PLUGIN_LOG: logPath,
+    ULTRACODE_AUTO_UPDATE: "0",
+    ULTRACODE_NO_AUTO_UPDATE: "0"
   });
 
   assert.strictEqual(code, 0, `cli exited 0 (stderr: ${stderr})`);

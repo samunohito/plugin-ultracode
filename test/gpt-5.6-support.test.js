@@ -14,41 +14,50 @@ const {
 } = require("./helpers/env.js");
 
 const {
-  DEFAULT_MODEL,
-  DEFAULT_REASONING_EFFORT,
   GPT_5_6_MODELS,
   GPT_5_6_REASONING_EFFORTS,
   runPipelineSpec,
   runWorkflow
 } = engine;
 
-test("GPT-5.6 Terra with medium reasoning is the default across workflow surfaces", async () => {
+test("unset model and reasoning effort inherit the Codex config across workflow surfaces", async () => {
   await withCodexHome(async (home) => {
-    const fixed = await withMockEnv({}, () =>
+    const sessionDir = freshSessionDir();
+    const fixed = await withMockEnv({ MOCK_CODEX_SESSION_DIR: sessionDir }, () =>
       runWorkflow({ task: "default fixed workflow", workers: 1, cwd: home, codex_bin: MOCK, codex_home: home })
     );
-    assert.strictEqual(fixed.options.model, DEFAULT_MODEL);
-    assert.strictEqual(fixed.options.reasoning_effort, DEFAULT_REASONING_EFFORT);
-    assert.strictEqual(fixed.workers[0].model, DEFAULT_MODEL);
-    assert.strictEqual(fixed.workers[0].reasoning_effort, DEFAULT_REASONING_EFFORT);
+    assert.ok(fixed.options.model == null);
+    assert.ok(fixed.options.reasoning_effort == null);
+    assert.ok(fixed.workers[0].model == null);
+    assert.ok(fixed.workers[0].reasoning_effort == null);
 
-    const panel = await withMockEnv({}, () =>
+    const panel = await withMockEnv({ MOCK_CODEX_SESSION_DIR: sessionDir }, () =>
       runWorkflow({ cwd: home, codex_bin: MOCK, codex_home: home, workers_spec: [{ prompt: "default panel" }] })
     );
-    assert.strictEqual(panel.options.model, DEFAULT_MODEL);
-    assert.strictEqual(panel.options.reasoning_effort, DEFAULT_REASONING_EFFORT);
-    assert.strictEqual(panel.workers[0].model, DEFAULT_MODEL);
-    assert.strictEqual(panel.workers[0].reasoning_effort, DEFAULT_REASONING_EFFORT);
+    assert.ok(panel.options.model == null);
+    assert.ok(panel.options.reasoning_effort == null);
+    assert.ok(panel.workers[0].model == null);
+    assert.ok(panel.workers[0].reasoning_effort == null);
 
     const dag = await withCodexCliPath(MOCK, () =>
-      withMockEnv({}, () =>
+      withMockEnv({ MOCK_CODEX_SESSION_DIR: sessionDir }, () =>
         runPipelineSpec({ cwd: home, codex_bin: MOCK, codex_home: home, steps: [{ id: "default", prompt: "default DAG" }] })
       )
     );
-    assert.strictEqual(dag.options.model, DEFAULT_MODEL);
-    assert.strictEqual(dag.options.reasoning_effort, DEFAULT_REASONING_EFFORT);
-    assert.strictEqual(dag.steps[0].model, DEFAULT_MODEL);
-    assert.strictEqual(dag.steps[0].reasoning_effort, DEFAULT_REASONING_EFFORT);
+    assert.ok(dag.options.model == null);
+    assert.ok(dag.options.reasoning_effort == null);
+    assert.ok(dag.steps[0].model == null);
+    assert.ok(dag.steps[0].reasoning_effort == null);
+
+    const invocations = readInvocations(sessionDir);
+    assert.strictEqual(invocations.length, 3);
+    for (const { argv } of invocations) {
+      assert.ok(!argv.includes("-m"), `no model override passed to Codex: ${argv.join(" ")}`);
+      assert.ok(
+        !argv.some((arg) => String(arg).startsWith("model_reasoning_effort=")),
+        `no reasoning override passed to Codex: ${argv.join(" ")}`
+      );
+    }
   });
 });
 

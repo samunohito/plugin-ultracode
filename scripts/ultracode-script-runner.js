@@ -216,10 +216,23 @@ function buildScope(ctx, input, hooks = {}) {
   // spawnWorker(prompt, opts?) -> FULL engine record {status,value,usage,...}.
   // ctx + phase defaults are injected; never throws (engine resolves a failure
   // to a {status:'failed'} record).
+  // Claude Workflow scripts (saved `.claude/workflows` definitions, or any run
+  // with `claude_compat`) expect agent() without a `schema` to return the
+  // worker's final text, not the WORKER_SCHEMA object.
+  const claudeCompat = Boolean(input.claude_compat || input.claudeCompat);
+
   function normalizeWorkerOpts(opts = {}) {
     const normalized = { ...(opts || {}) };
     if (normalized.agentType && !normalized.label) normalized.label = String(normalized.agentType);
     if (normalized.name && !normalized.label) normalized.label = String(normalized.name);
+    // `effort` is the Claude Workflow spelling of reasoning_effort.
+    if (normalized.effort !== undefined) {
+      if (normalized.reasoning_effort === undefined && normalized.reasoningEffort === undefined) {
+        normalized.reasoning_effort = normalized.effort;
+      }
+      delete normalized.effort;
+    }
+    if (claudeCompat && normalized.schema === undefined) normalized.schema = null;
     return normalized;
   }
 
@@ -419,8 +432,6 @@ function buildScope(ctx, input, hooks = {}) {
     const defaults = {
       cwd: input.cwd ? path.resolve(input.cwd) : process.cwd(),
       sandbox: input.sandbox || "read-only",
-      model: engine.DEFAULT_MODEL,
-      reasoning_effort: engine.DEFAULT_REASONING_EFFORT,
       timeout_ms:
         input.timeout_ms === undefined || input.timeout_ms === null
           ? undefined
@@ -792,7 +803,12 @@ async function runScript(input = {}) {
     record.result = null;
     record.error = error instanceof Error ? error.message : String(error);
   } else {
-    record.status = "completed";
+    // agent() turns a failed worker into `null`, so a script can return
+    // normally while some of its workers died. Surface that as 'partial'
+    // instead of reporting a clean 'completed'.
+    const failedWorkers = record.workers.filter((worker) => worker && (worker.status === "failed" || worker.status === "cancelled")).length;
+    record.status = failedWorkers > 0 ? "partial" : "completed";
+    if (failedWorkers > 0) record.failed_workers = failedWorkers;
     record.result = result === undefined ? null : result;
   }
 

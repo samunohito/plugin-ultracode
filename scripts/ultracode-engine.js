@@ -17,6 +17,7 @@ const {
   reconcileRunningRecord
 } = require("./run-lifecycle");
 const { attachWorkflowUi, shouldLaunchUi } = require("./ultracode-ui-launcher");
+const { stripOptionalNulls, toStrictSchema } = require("./strict-schema");
 
 const execFileP = util.promisify(childProcess.execFile);
 
@@ -27,8 +28,9 @@ const DEFAULT_MAX_AGENTS = 1000;
 const MAX_NESTING_DEPTH = 1;
 const DEFAULT_LAUNCH_STAGGER_MS = 25;
 const VALID_SANDBOXES = new Set(["read-only", "workspace-write", "danger-full-access"]);
-const DEFAULT_MODEL = "gpt-5.6-terra";
-const DEFAULT_REASONING_EFFORT = "medium";
+// There is deliberately no default model or reasoning effort: a worker that
+// does not set them passes no `-m` / `model_reasoning_effort` override, so it
+// inherits whatever the user's Codex config (`~/.codex/config.toml`) selects.
 const GPT_5_6_MODELS = Object.freeze(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]);
 const GPT_5_6_REASONING_EFFORTS = Object.freeze(["none", "low", "medium", "high", "xhigh", "max", "ultra"]);
 const VALID_EFFORTS = new Set(GPT_5_6_REASONING_EFFORTS);
@@ -172,11 +174,11 @@ function positiveInteger(value, fallback, max) {
 }
 
 function resolveModel(value) {
-  return typeof value === "string" && value.trim() ? value.trim() : DEFAULT_MODEL;
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
 function resolveReasoningEffort(value) {
-  return value || DEFAULT_REASONING_EFFORT;
+  return value || undefined;
 }
 
 function normalizeOptions(input = {}) {
@@ -475,8 +477,7 @@ function validateAgainstSchema(value, schema) {
   function check(val, sch, p) {
     if (!sch || typeof sch !== "object") return;
     if (sch.type) {
-      const t = sch.type;
-      const ok =
+      const matchesType = (t) =>
         t === "object"
           ? val && typeof val === "object" && !Array.isArray(val)
           : t === "array"
@@ -492,8 +493,10 @@ function validateAgainstSchema(value, schema) {
           : t === "null"
           ? val === null
           : true;
-      if (!ok) {
-        errors.push(`${p || "(root)"}: expected ${t}`);
+      // A type union (`["string", "null"]`) passes when any member matches.
+      const types = Array.isArray(sch.type) ? sch.type : [sch.type];
+      if (!types.some(matchesType)) {
+        errors.push(`${p || "(root)"}: expected ${types.join(" | ")}`);
         return;
       }
     }
@@ -1026,7 +1029,10 @@ function resolveWorkerOpts(opts = {}) {
     executor,
     transport,
     transportStrict,
+    // `schema` is the caller's contract (validation + returned shape);
+    // `wireSchema` is its strict-mode rewrite, the only form sent to Codex.
     schema,
+    wireSchema: schema ? toStrictSchema(schema) : schema,
     schemaRetries:
       opts.schemaRetries === undefined ? (schema ? 1 : 0) : Math.max(0, Math.floor(Number(opts.schemaRetries))),
     // Transient-error retry knobs. maxRetries defaults to 0 => zero transient
@@ -1369,7 +1375,7 @@ async function spawnWorkerGuarded(prompt, opts, ctx, resumeSessionId = null) {
     // On a resume turn the schema must be embedded in the prompt (the CLI rejects
     // --output-schema), so warm and cold use different base prompts.
     const buildPrompt = () =>
-      activeResume ? injectSchemaIntoPrompt(prompt, opts.schema) : prompt;
+      activeResume ? injectSchemaIntoPrompt(prompt, opts.wireSchema) : prompt;
     let currentPrompt = buildPrompt();
     while (true) {
       // Cancellation gate (loop top): stop scheduling new attempts once aborted.
@@ -1393,7 +1399,7 @@ async function spawnWorkerGuarded(prompt, opts, ctx, resumeSessionId = null) {
       try {
         attemptResult = await runCodexAttempt({
           prompt: currentPrompt,
-          schema: opts.schema,
+          schema: opts.wireSchema,
           opts: {
             ...runOpts,
             depth: ctx ? ctx.depth : 0,
@@ -1490,7 +1496,10 @@ async function spawnWorkerGuarded(prompt, opts, ctx, resumeSessionId = null) {
         return failedWorker(label, phase, error.message, execResult, usage, execResult ? execResult.duration_ms : 0);
       }
 
-      const { execResult, value } = attemptResult;
+      const { execResult } = attemptResult;
+      // Strict mode answers an optional property with `null`; drop those so the
+      // value matches the caller's original schema before it is validated.
+      const value = opts.schema ? stripOptionalNulls(attemptResult.value, opts.schema) : attemptResult.value;
       const usage = execResult.usage || parseUsage(execResult.stdout);
       accountUsage(ctx, usage);
 
@@ -3095,8 +3104,6 @@ async function runPipelineSpec(input = {}) {
 module.exports = {
   MAX_WORKERS,
   DEFAULT_MAX_AGENTS,
-  DEFAULT_MODEL,
-  DEFAULT_REASONING_EFFORT,
   GPT_5_6_MODELS,
   GPT_5_6_REASONING_EFFORTS,
   WORKER_SCHEMA,

@@ -56,14 +56,16 @@ node scripts/ultracode-cli.js @deep-research --args '{"topic":"Codex"}'
 
 ## Automatic updates
 
-Ultracode keeps itself fresh automatically. Before any command it runs
+Auto-update is **opt-in**: it reinstalls the plugin into the user's Codex home, so it never runs unless asked
+for. When enabled, before any command it runs
 `codex plugin marketplace upgrade <marketplace>` then `codex plugin add <plugin>@<marketplace>`, but **at most
 once per 24h** (tracked by a stamp file in the codex home) and **best-effort** — a failure (offline, marketplace
 down) never breaks the command; it only logs `[ultracode] auto-update skipped: …`. The refresh updates the
 installed cache for *future* Codex sessions; the current thread keeps the version it already loaded, so it never
 mutates the running command.
 
-- Opt out with `--no-auto-update` on any command, or `ULTRACODE_NO_AUTO_UPDATE=1` (or `ULTRACODE_AUTO_UPDATE=0`).
+- Opt in with `--auto-update` on any command, or `ULTRACODE_AUTO_UPDATE=1`. `--no-auto-update` /
+  `ULTRACODE_NO_AUTO_UPDATE=1` always win.
 - `marketplace`: marketplace name, default `just-every` (or `ULTRACODE_MARKETPLACE`).
 - `plugin`: plugin name, default from `.codex-plugin/plugin.json`.
 - `codex_bin`: Codex binary path (else `ULTRACODE_UPDATE_CODEX_BIN`, `CODEX_CLI_PATH`, or `codex`).
@@ -76,13 +78,14 @@ Fans out the built-in fixed reviewer roles in parallel and returns structured fi
 - `task`: natural-language objective (required unless `workers_spec` is given).
 - `cwd`: repository or workspace path. Use the current working directory when possible.
 - `workers`: 1-8. Use 3 for normal deep work, 5-6 for broad audits.
-- `model`: optional Codex model for child workers; defaults to `gpt-5.6-terra`. GPT-5.6 Codex workers use
+- `model`: optional Codex model for child workers. Unset means no `-m` override: workers use the model from the
+  user's Codex config (`~/.codex/config.toml`). GPT-5.6 Codex workers use
   `gpt-5.6-sol`, `gpt-5.6-terra`, or `gpt-5.6-luna`. Use Luna for efficient high-volume lanes, Terra for
   balanced work, and Sol for complex coding and reasoning. Do not use the API alias `gpt-5.6` with a
   ChatGPT-authenticated Codex CLI. Prefer per-`workers_spec`/step overrides when a workflow mixes cheap scout
   lanes with deeper verifier/writer lanes.
 - `reasoning_effort`: optional `none`, `low`, `medium`, `high`, `xhigh`, `max`, or `ultra` for GPT-5.6 Codex
-  workers; defaults to `medium`. Use `low` for latency-sensitive lanes, `medium` as the balanced starting point,
+  workers; unset inherits `model_reasoning_effort` from the Codex config. Use `low` for latency-sensitive lanes, `medium` as the balanced starting point,
   `high` or `xhigh` when evaluation shows a quality gain, and reserve `max` or `ultra` for the hardest
   quality-first workloads.
 - `sandbox`: default `read-only`. Use `workspace-write` or `danger-full-access` only when the user explicitly
@@ -131,7 +134,11 @@ the fixed roles (`runWorkflow` → `runExplicitWorkflow`; `record.options.explic
 - `prompt` (required): the worker's full instructions.
 - `label`: display label used in progress and aggregation.
 - `schema`: a JSON Schema object for this worker's output. Omit for the default `WORKER_SCHEMA`; pass `null`
-  for raw free-text. (A worked custom schema is in `cookbook.md`.)
+  for raw free-text. (A worked custom schema is in `cookbook.md`.) Codex enforces output schemas in strict
+  mode, so the engine sends a strict rewrite: every object gets `additionalProperties: false` (unless set) and
+  lists all properties as `required`, with originally-optional ones made nullable. Those `null`s are stripped
+  from the returned value, so you get the shape your own schema describes — no need to hand-write strict
+  schemas.
 - `sandbox`, `model`, `reasoning_effort`, `phase`, `timeout_ms`, `cwd`: per-worker overrides.
 - `isolation: "worktree"`: run a writable worker in an isolated git worktree (its diff is collected back).
 
@@ -192,6 +199,8 @@ one `ctx` (concurrency limiter, usage accumulator, `budget`, lifetime cap, progr
 
 - `spawnWorker(prompt, opts)` → one `codex exec` worker; returns `{status, value, result, usage, ...}`. With
   `opts.schema` it validates and retries once on mismatch; with `schema: null` it returns raw text. Never throws.
+  `effort` is accepted as an alias of `reasoning_effort` (the Claude Workflow spelling); an explicit
+  `reasoning_effort` wins.
 - `spawnWarmWorker(prompt, opts)` → like `spawnWorker` but returns a handle whose `.turn(prompt)` resumes the
   **same** warm Codex session (`executor: "resume"`); any resume the CLI cannot honor falls back to cold exec.
 - `runParallel(thunks, {ctx})` → barrier gather; a throwing thunk degrades to `null` (logged).
@@ -233,6 +242,8 @@ Bound scope (ctx is auto-injected — never pass it):
 - `budget` (`{ total, spent(), remaining() }`), `args`, `ctx`, `WORKER_SCHEMA`, `VERDICT_SCHEMA`.
 
 Top-level `await` and a top-level `return` (or top-level `export default <expr>`) become `record.result`.
+A script that returns normally is `status: "completed"`, or `status: "partial"` with `failed_workers: <n>`
+when any of its workers failed or was cancelled (those calls resolved to `null` inside the script).
 The journaled `kind: "script"` record is readable by `status`, updates while the script is running, and includes
 the dynamic worker records spawned by `agent`, `spawnWorker`, `loopUntilDry`, and `adversarialVerify`. See
 `examples/parallel-reduce.workflow.js`, `examples/budget-loop.workflow.js`,
@@ -285,8 +296,9 @@ node scripts/ultracode-cli.js workflow delete deep-research
 node scripts/ultracode-cli.js @deep-research --args '{"topic":"Codex"}'
 ```
 
-Running a saved definition (via `@name` / `--workflow <name>`) turns on strict Claude-compat diagnostics and
-adapters before execution. Allowed workflow primitive imports are rewritten to the bound runtime,
+Running a saved definition (via `@name` / `--workflow <name>`), or any script with `--claude-compat`, turns on
+strict Claude-compat diagnostics and adapters before execution. In compat mode `agent()` without a `schema`
+returns the worker's final text (as Claude's Workflow does) instead of a `WORKER_SCHEMA` object. Allowed workflow primitive imports are rewritten to the bound runtime,
 `export async function run(context)` is invoked automatically, and direct workflow-side filesystem/shell/host
 access fails explicitly before workers spawn. The dashboard server also exposes definition
 list/show/save/update/delete/run endpoints, and the React UI shows the workflow library with source editing and

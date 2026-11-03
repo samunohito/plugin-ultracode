@@ -83,8 +83,8 @@ test("resolveWorkerOpts executor defaults to 'cold' and persistSession false", (
   const r = resolveWorkerOpts({});
   assert.strictEqual(r.executor, "cold");
   assert.strictEqual(r.persistSession, false);
-  assert.strictEqual(r.model, engine.DEFAULT_MODEL);
-  assert.strictEqual(r.reasoningEffort, engine.DEFAULT_REASONING_EFFORT);
+  assert.strictEqual(r.model, undefined, "unset model inherits the Codex config");
+  assert.strictEqual(r.reasoningEffort, undefined, "unset effort inherits the Codex config");
 });
 
 test("resolveWorkerOpts executor:'resume' forces persistSession=true", () => {
