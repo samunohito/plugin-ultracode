@@ -1,3 +1,10 @@
+上流(  https://github.com/just-every/plugin-ultracode https://github.com/just-every/plugin-ultracode )の実装を私用に調整したものです。 
+
+- このリポジトリの内容を活用するために生じた事項について一切の責任を負いません
+- このリポジトリについての確認などの問い合わせを上流に行うことは避けてください
+
+---
+
 # Ultracode Plugin for Codex
 
 Part of the [Just Every Codex plugin marketplace](https://github.com/just-every/plugins).
