@@ -66,6 +66,29 @@ test("transient auth-refresh races are retryable with one implicit restart", () 
   }
 });
 
+test("model capacity errors on stderr or JSON stdout get two implicit retries", () => {
+  const message = "Selected model is at capacity. Please try a different model.";
+  for (const output of [{ stderr: message }, { stdout: JSON.stringify({ error: { message } }) }]) {
+    const c = classifyCodexError(new Error("worker failed"), execOf(output));
+    assert.strictEqual(c.transient, true);
+    assert.strictEqual(c.defaultMaxRetries, 2);
+    assert.match(c.reason, /model capacity/);
+  }
+});
+
+test("capacity wording does not override permanent errors, timeouts, or successful exits", () => {
+  const message = "Selected model is at capacity. Please try a different model.";
+  for (const output of [
+    { stderr: `Unauthorized: ${message}` },
+    { stderr: `schema validation error: ${message}` },
+    { stderr: message, timed_out: true },
+    { stderr: message, exit_code: 0 },
+    { stderr: "The context window is at capacity." }
+  ]) {
+    assert.strictEqual(classifyCodexError(new Error("x"), execOf(output)).transient, false);
+  }
+});
+
 test("transient auth-refresh race remains retryable when the child exited by signal", () => {
   const c = classifyCodexError(
     new Error("worker exited with SIGTERM"),

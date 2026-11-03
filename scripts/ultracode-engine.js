@@ -587,6 +587,7 @@ const TRANSIENT_AUTH_REFRESH_RE = /(?:authentication expired\.\s*)?\b(?:oauth|au
 // before generic retryable output so e.g. an "unauthorized" message is never
 // mistaken for transient.
 const PERMANENT_OUTPUT_RE = /unauthorized|invalid api key|authentication|forbidden\b|permission denied|unknown (option|argument|flag)|unrecognized|invalid value|schema|usage:/i;
+const MODEL_CAPACITY_RE = /\b(?:selected )?model is at capacity\b/i;
 // Retryable signatures: HTTP 429/5xx, rate-limit, known network errno, overload.
 const RETRYABLE_OUTPUT_RE = /\b(429|5\d\d)\b|rate.?limit|too many requests|temporarily unavailable|timed? out|timeout|connection reset|connection refused|econnreset|econnrefused|etimedout|enetunreach|eai_again|socket hang up|network|server error|service unavailable|overloaded|please try again/i;
 
@@ -623,6 +624,9 @@ function classifyCodexError(error, execResult) {
   // Permanent patterns win over generic retryable ones.
   if (haystack && PERMANENT_OUTPUT_RE.test(haystack)) {
     return { transient: false, reason: "permanent error pattern" };
+  }
+  if (runtimeFailed && haystack && MODEL_CAPACITY_RE.test(haystack)) {
+    return { transient: true, reason: "retryable: model capacity", defaultMaxRetries: 2 };
   }
   // Only a genuinely non-zero exit (not a schema/read failure on a clean exit)
   // qualifies as a retryable runtime error.
@@ -1050,8 +1054,8 @@ function resolveWorkerOpts(opts = {}) {
     wireSchema: schema ? toStrictSchema(schema) : schema,
     schemaRetries:
       opts.schemaRetries === undefined ? (schema ? 1 : 0) : Math.max(0, Math.floor(Number(opts.schemaRetries))),
-    // Transient-error retry knobs. maxRetries defaults to 0 => zero transient
-    // retries => identical to the pre-retry engine on every non-zero exit.
+    // Generic transient retries are opt-in. Narrow auth-refresh and model-capacity
+    // failures receive the classifier's bounded implicit retry budget.
     maxRetries: clampNonNegInt(firstDefined(opts.maxRetries, opts.max_retries), 0),
     baseDelayMs: clampNonNegInt(firstDefined(opts.baseDelayMs, opts.base_delay_ms), 500),
     maxDelayMs: clampNonNegInt(firstDefined(opts.maxDelayMs, opts.max_delay_ms), 30_000),
@@ -1469,8 +1473,8 @@ async function spawnWorkerGuarded(prompt, opts, ctx, resumeSessionId = null) {
         }
 
         // Classify: transient (retry with backoff) vs permanent (fail now, as the
-        // engine always did). maxRetries defaults to 0; only narrowly-classified
-        // auth-refresh races get one implicit restart without an explicit retry budget.
+        // engine always did). maxRetries defaults to 0; narrow auth-refresh and
+        // model-capacity failures receive a bounded implicit retry budget.
         const classification = classifyCodexError(error, execResult);
         const effectiveMaxRetries = Math.max(opts.maxRetries, classification.defaultMaxRetries || 0);
         const canRetry =

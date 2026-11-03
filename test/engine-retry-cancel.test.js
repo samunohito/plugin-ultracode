@@ -122,6 +122,46 @@ test("default no-op: maxRetries unset, generic stderr => failed after ONE invoca
   assert.strictEqual(events.filter((e) => e.type === "worker.retry").length, 0);
 });
 
+for (const failTimes of [2, 99]) {
+  test(`model capacity with default options: ${failTimes === 2 ? "recovers" : "stops"} after two retries`, async () => {
+    const counter = freshCounterPath();
+    const events = [];
+    const ctx = createContext({ concurrency: 1, onEvent: (e) => events.push(e) });
+    const r = await withMockEnv(
+      {
+        MOCK_CODEX_FAIL_TIMES: String(failTimes),
+        MOCK_CODEX_EXIT: "1",
+        MOCK_CODEX_STDERR: "Selected model is at capacity. Please try a different model.",
+        MOCK_CODEX_COUNTER: counter
+      },
+      () => spawnWorker("prompt", { ...mockOpts(), ctx, baseDelayMs: 1, maxDelayMs: 2, retryJitter: false })
+    );
+    assert.strictEqual(r.status, failTimes === 2 ? "completed" : "failed");
+    assert.strictEqual(parseInt(fs.readFileSync(counter, "utf8"), 10), 3);
+    assert.strictEqual(ctx.spawnedCount, 3);
+    const retries = events.filter((e) => e.type === "worker.retry");
+    assert.strictEqual(retries.length, 2);
+    assert.deepStrictEqual(retries.map((e) => e.delay_ms), [1, 2]);
+    assert.ok(retries.every((e) => e.max_retries === 2 && /model capacity/.test(e.reason)));
+  });
+}
+
+test("implicit capacity retries respect the worker cap", async () => {
+  const counter = freshCounterPath();
+  const ctx = createContext({ concurrency: 1, maxAgents: 1 });
+  const r = await withMockEnv(
+    {
+      MOCK_CODEX_EXIT: "1",
+      MOCK_CODEX_STDERR: "Selected model is at capacity. Please try a different model.",
+      MOCK_CODEX_COUNTER: counter
+    },
+    () => spawnWorker("prompt", { ...mockOpts(), ctx, baseDelayMs: 1 })
+  );
+  assert.strictEqual(r.status, "failed");
+  assert.strictEqual(ctx.spawnedCount, 1);
+  assert.strictEqual(parseInt(fs.readFileSync(counter, "utf8"), 10), 1);
+});
+
 test("generic (unclassified) stderr is fail-closed even with maxRetries set", async () => {
   const counter = freshCounterPath();
   const ctx = createContext({ concurrency: 1 });
