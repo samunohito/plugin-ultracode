@@ -36,19 +36,26 @@ test("dispatchParse routes lifecycle verbs vs the unified exec command", () => {
   }
 });
 
-test("autoUpdateDisabled honors the opt-out flag and env vars", () => {
+test("autoUpdateEnabled is opt-in and the opt-out still wins", () => {
   const savedNo = process.env.ULTRACODE_NO_AUTO_UPDATE;
   const savedLegacy = process.env.ULTRACODE_AUTO_UPDATE;
   try {
     delete process.env.ULTRACODE_NO_AUTO_UPDATE;
     delete process.env.ULTRACODE_AUTO_UPDATE;
-    assert.strictEqual(cli.autoUpdateDisabled({}), false, "on by default");
-    assert.strictEqual(cli.autoUpdateDisabled({ no_auto_update: true }), true, "--no-auto-update opts out");
+    assert.strictEqual(cli.autoUpdateEnabled({}), false, "off by default");
+    assert.strictEqual(cli.autoUpdateEnabled({ auto_update: true }), true, "--auto-update opts in");
+    assert.strictEqual(
+      cli.autoUpdateEnabled({ auto_update: true, no_auto_update: true }),
+      false,
+      "--no-auto-update wins over --auto-update"
+    );
+    process.env.ULTRACODE_AUTO_UPDATE = "1";
+    assert.strictEqual(cli.autoUpdateEnabled({}), true, "ULTRACODE_AUTO_UPDATE=1 opts in");
     process.env.ULTRACODE_NO_AUTO_UPDATE = "1";
-    assert.strictEqual(cli.autoUpdateDisabled({}), true, "ULTRACODE_NO_AUTO_UPDATE=1 opts out");
+    assert.strictEqual(cli.autoUpdateEnabled({}), false, "ULTRACODE_NO_AUTO_UPDATE=1 wins");
     process.env.ULTRACODE_NO_AUTO_UPDATE = "0";
     process.env.ULTRACODE_AUTO_UPDATE = "0";
-    assert.strictEqual(cli.autoUpdateDisabled({}), true, "legacy ULTRACODE_AUTO_UPDATE=0 opts out");
+    assert.strictEqual(cli.autoUpdateEnabled({}), false, "ULTRACODE_AUTO_UPDATE=0 stays off");
   } finally {
     if (savedNo === undefined) delete process.env.ULTRACODE_NO_AUTO_UPDATE;
     else process.env.ULTRACODE_NO_AUTO_UPDATE = savedNo;

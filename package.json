@@ -7,6 +7,6 @@
     "url": "https://github.com/just-every/plugin-ultracode.git"
   },
   "scripts": {
-    "test": "node --test \"test/**/*.test.js\""
+    "test": "node --test --require ./test/helpers/isolate-codex-home.js \"test/**/*.test.js\""
   }
 }

@@ -80,8 +80,8 @@ schemas, or no verification.
 ## Operating rules
 
 - **Choose model and reasoning by task complexity.** When a run does not require a custom model mix, set the
-  worker `model` and `reasoning_effort` deliberately instead of leaving complexity implicit. The default is
-  `gpt-5.6-terra` + `medium`:
+  worker `model` and `reasoning_effort` deliberately instead of leaving complexity implicit. Unset workers
+  inherit the user's Codex config:
   `gpt-5.6-luna` + `low` for high-volume, latency-sensitive work; `gpt-5.6-terra` + `medium` for standard
   research and coding; `gpt-5.6-sol` + `high` for complex work; and `gpt-5.6-sol` + `xhigh` or `max` only when
   evaluation shows a quality gain. In Codex CLI, GPT-5.6 supports `none`, `low`, `medium`, `high`, `xhigh`,

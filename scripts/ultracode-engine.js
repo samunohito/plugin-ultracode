@@ -17,6 +17,7 @@ const {
   reconcileRunningRecord
 } = require("./run-lifecycle");
 const { attachWorkflowUi, shouldLaunchUi } = require("./ultracode-ui-launcher");
+const { stripOptionalNulls, toStrictSchema } = require("./strict-schema");
 
 const execFileP = util.promisify(childProcess.execFile);
 
@@ -27,11 +28,16 @@ const DEFAULT_MAX_AGENTS = 1000;
 const MAX_NESTING_DEPTH = 1;
 const DEFAULT_LAUNCH_STAGGER_MS = 25;
 const VALID_SANDBOXES = new Set(["read-only", "workspace-write", "danger-full-access"]);
-const DEFAULT_MODEL = "gpt-5.6-terra";
-const DEFAULT_REASONING_EFFORT = "medium";
+// There is deliberately no default model or reasoning effort: a worker that
+// does not set them passes no `-m` / `model_reasoning_effort` override, so it
+// inherits whatever the user's Codex config (`~/.codex/config.toml`) selects.
 const GPT_5_6_MODELS = Object.freeze(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]);
+// Known GPT-5.6 values, kept for reference and tests only. Reasoning effort is
+// NOT validated against a list: supported values differ per model (gpt-6.1-sol
+// accepts only low..max, without `none` or `ultra`), and Codex rejects an
+// unsupported value with an explicit 400 naming the accepted ones before the
+// model runs.
 const GPT_5_6_REASONING_EFFORTS = Object.freeze(["none", "low", "medium", "high", "xhigh", "max", "ultra"]);
-const VALID_EFFORTS = new Set(GPT_5_6_REASONING_EFFORTS);
 // Worker transports. 'exec' (default) = today's `codex exec --json` JSONL
 // scraping, byte-for-byte unchanged. 'app-server' = opt-in versioned JSON-RPC
 // app-server transport (with automatic fallback to exec). 'exec-server' = a
@@ -114,7 +120,10 @@ const VERDICT_SCHEMA = {
   required: ["refuted", "reason"]
 };
 
-function codexHome() {
+// An explicit `codex_home` (option / --codex-home) wins over $CODEX_HOME, so a
+// run's workers AND its journaled state live in the same home.
+function codexHome(override) {
+  if (typeof override === "string" && override.trim()) return override.trim();
   if (process.env.CODEX_HOME && process.env.CODEX_HOME.trim()) {
     return process.env.CODEX_HOME.trim();
   }
@@ -147,12 +156,12 @@ function defaultCodexBin() {
   return "codex";
 }
 
-function stateDir() {
-  return path.join(codexHome(), "ultracode", "runs");
+function stateDir(home) {
+  return path.join(codexHome(home), "ultracode", "runs");
 }
 
-function statePathFor(id) {
-  return path.join(stateDir(), `${id}.json`);
+function statePathFor(id, home) {
+  return path.join(stateDir(home), `${id}.json`);
 }
 
 function assertNonEmptyString(value, name) {
@@ -172,11 +181,20 @@ function positiveInteger(value, fallback, max) {
 }
 
 function resolveModel(value) {
-  return typeof value === "string" && value.trim() ? value.trim() : DEFAULT_MODEL;
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
 function resolveReasoningEffort(value) {
-  return value || DEFAULT_REASONING_EFFORT;
+  return value || undefined;
+}
+
+// Shape check only: which values a model accepts is Codex's call (see
+// GPT_5_6_REASONING_EFFORTS).
+function assertReasoningEffort(value, name) {
+  if (value === undefined || value === null) return;
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`${name} must be a non-empty string.`);
+  }
 }
 
 function normalizeOptions(input = {}) {
@@ -188,9 +206,7 @@ function normalizeOptions(input = {}) {
     throw new Error(`sandbox must be one of: ${Array.from(VALID_SANDBOXES).join(", ")}.`);
   }
   const reasoningEffort = resolveReasoningEffort(input.reasoning_effort || input.reasoningEffort);
-  if (reasoningEffort !== undefined && !VALID_EFFORTS.has(reasoningEffort)) {
-    throw new Error(`reasoning_effort must be one of: ${Array.from(VALID_EFFORTS).join(", ")}.`);
-  }
+  assertReasoningEffort(reasoningEffort, "reasoning_effort");
   const timeoutMs =
     input.timeout_ms === undefined || input.timeout_ms === null
       ? DEFAULT_TIMEOUT_MS
@@ -255,17 +271,17 @@ async function readJson(filePath) {
   return JSON.parse(await fs.readFile(filePath, "utf8"));
 }
 
-async function latestStatePath() {
+async function latestStatePath(home) {
   let entries;
   try {
-    entries = await fs.readdir(stateDir(), { withFileTypes: true });
+    entries = await fs.readdir(stateDir(home), { withFileTypes: true });
   } catch (error) {
     if (error.code === "ENOENT") return null;
     throw error;
   }
   const files = entries
     .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
-    .map((entry) => path.join(stateDir(), entry.name));
+    .map((entry) => path.join(stateDir(home), entry.name));
   if (files.length === 0) return null;
   const stats = await Promise.all(files.map(async (file) => ({ file, stat: await fs.stat(file) })));
   stats.sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
@@ -277,9 +293,9 @@ async function readWorkflow(input = {}) {
   if (input.state_path) {
     filePath = path.resolve(assertNonEmptyString(input.state_path, "state_path"));
   } else if (input.workflow_id) {
-    filePath = statePathFor(assertNonEmptyString(input.workflow_id, "workflow_id"));
+    filePath = statePathFor(assertNonEmptyString(input.workflow_id, "workflow_id"), input.codex_home);
   } else {
-    filePath = await latestStatePath();
+    filePath = await latestStatePath(input.codex_home);
   }
   if (!filePath) {
     return { status: "missing", message: "No Ultracode workflow state exists yet." };
@@ -403,6 +419,9 @@ function createContext(opts = {}) {
     opts.budgetTokens === undefined || opts.budgetTokens === null || opts.budgetTokens === ""
       ? null
       : Math.max(0, Math.floor(Number(opts.budgetTokens)));
+  // Which usage counter the budget meters: "total_tokens" (default) or
+  // "output_tokens" (Claude Workflow semantics, used by claude_compat scripts).
+  const budgetMetric = opts.budgetMetric === "output_tokens" ? "output_tokens" : "total_tokens";
   const launchStaggerMs = clampNonNegInt(
     firstDefined(opts.launchStaggerMs, opts.launch_stagger_ms, process.env.ULTRACODE_LAUNCH_STAGGER_MS),
     DEFAULT_LAUNCH_STAGGER_MS
@@ -434,8 +453,8 @@ function createContext(opts = {}) {
     signal: controller.signal,
     budget: {
       total: budgetTotal,
-      spent: () => usageTotals.total_tokens,
-      remaining: () => (budgetTotal === null ? Infinity : Math.max(0, budgetTotal - usageTotals.total_tokens))
+      spent: () => usageTotals[budgetMetric] || 0,
+      remaining: () => (budgetTotal === null ? Infinity : Math.max(0, budgetTotal - (usageTotals[budgetMetric] || 0)))
     }
   };
   ctx.cancelled = () => controller.signal.aborted;
@@ -475,8 +494,7 @@ function validateAgainstSchema(value, schema) {
   function check(val, sch, p) {
     if (!sch || typeof sch !== "object") return;
     if (sch.type) {
-      const t = sch.type;
-      const ok =
+      const matchesType = (t) =>
         t === "object"
           ? val && typeof val === "object" && !Array.isArray(val)
           : t === "array"
@@ -492,8 +510,10 @@ function validateAgainstSchema(value, schema) {
           : t === "null"
           ? val === null
           : true;
-      if (!ok) {
-        errors.push(`${p || "(root)"}: expected ${t}`);
+      // A type union (`["string", "null"]`) passes when any member matches.
+      const types = Array.isArray(sch.type) ? sch.type : [sch.type];
+      if (!types.some(matchesType)) {
+        errors.push(`${p || "(root)"}: expected ${types.join(" | ")}`);
         return;
       }
     }
@@ -993,9 +1013,7 @@ function resolveWorkerOpts(opts = {}) {
     throw new Error(`sandbox must be one of: ${Array.from(VALID_SANDBOXES).join(", ")}.`);
   }
   const reasoningEffort = resolveReasoningEffort(opts.reasoningEffort || opts.reasoning_effort);
-  if (reasoningEffort !== undefined && reasoningEffort !== null && !VALID_EFFORTS.has(reasoningEffort)) {
-    throw new Error(`reasoning_effort must be one of: ${Array.from(VALID_EFFORTS).join(", ")}.`);
-  }
+  assertReasoningEffort(reasoningEffort, "reasoning_effort");
   const schema = opts.schema === undefined ? WORKER_SCHEMA : opts.schema;
   // Warm-context executor selection. 'cold' (default) = unchanged cold exec
   // fan-out. 'resume' = keep a Codex session warm across turns via
@@ -1026,7 +1044,10 @@ function resolveWorkerOpts(opts = {}) {
     executor,
     transport,
     transportStrict,
+    // `schema` is the caller's contract (validation + returned shape);
+    // `wireSchema` is its strict-mode rewrite, the only form sent to Codex.
     schema,
+    wireSchema: schema ? toStrictSchema(schema) : schema,
     schemaRetries:
       opts.schemaRetries === undefined ? (schema ? 1 : 0) : Math.max(0, Math.floor(Number(opts.schemaRetries))),
     // Transient-error retry knobs. maxRetries defaults to 0 => zero transient
@@ -1294,7 +1315,7 @@ async function spawnWorkerGuarded(prompt, opts, ctx, resumeSessionId = null) {
   const capExceeded = () => {
     if (ctx && ctx.budget.total !== null && ctx.budget.remaining() <= 0) {
       log(ctx, `Skipping worker "${label}": token budget exhausted.`, { label, reason: "budget" });
-      return failedWorker(label, phase, "token budget exhausted");
+      return { ...failedWorker(label, phase, "token budget exhausted"), cap: "budget" };
     }
     if (ctx && ctx.spawnedCount >= ctx.maxAgents) {
       log(ctx, `Skipping worker "${label}": lifetime agent cap (${ctx.maxAgents}) reached.`, {
@@ -1369,7 +1390,7 @@ async function spawnWorkerGuarded(prompt, opts, ctx, resumeSessionId = null) {
     // On a resume turn the schema must be embedded in the prompt (the CLI rejects
     // --output-schema), so warm and cold use different base prompts.
     const buildPrompt = () =>
-      activeResume ? injectSchemaIntoPrompt(prompt, opts.schema) : prompt;
+      activeResume ? injectSchemaIntoPrompt(prompt, opts.wireSchema) : prompt;
     let currentPrompt = buildPrompt();
     while (true) {
       // Cancellation gate (loop top): stop scheduling new attempts once aborted.
@@ -1393,7 +1414,7 @@ async function spawnWorkerGuarded(prompt, opts, ctx, resumeSessionId = null) {
       try {
         attemptResult = await runCodexAttempt({
           prompt: currentPrompt,
-          schema: opts.schema,
+          schema: opts.wireSchema,
           opts: {
             ...runOpts,
             depth: ctx ? ctx.depth : 0,
@@ -1490,7 +1511,10 @@ async function spawnWorkerGuarded(prompt, opts, ctx, resumeSessionId = null) {
         return failedWorker(label, phase, error.message, execResult, usage, execResult ? execResult.duration_ms : 0);
       }
 
-      const { execResult, value } = attemptResult;
+      const { execResult } = attemptResult;
+      // Strict mode answers an optional property with `null`; drop those so the
+      // value matches the caller's original schema before it is validated.
+      const value = opts.schema ? stripOptionalNulls(attemptResult.value, opts.schema) : attemptResult.value;
       const usage = execResult.usage || parseUsage(execResult.stdout);
       accountUsage(ctx, usage);
 
@@ -1770,7 +1794,7 @@ async function loopUntilDry(makePrompt, opts = {}) {
       schema,
       sandbox: opts.sandbox,
       model: opts.model,
-      reasoningEffort: opts.reasoningEffort,
+      reasoningEffort: firstDefined(opts.reasoningEffort, opts.reasoning_effort),
       timeoutMs: opts.timeoutMs || opts.timeout_ms,
       cwd: opts.cwd,
       codex_bin: opts.codex_bin,
@@ -1860,7 +1884,7 @@ async function adversarialVerify(findings, opts = {}) {
             schema,
             sandbox: opts.sandbox || "read-only",
             model: opts.model,
-            reasoningEffort: opts.reasoningEffort,
+            reasoningEffort: firstDefined(opts.reasoningEffort, opts.reasoning_effort),
             timeoutMs: opts.timeoutMs || opts.timeout_ms,
             cwd: opts.cwd,
             codex_bin: opts.codex_bin,
@@ -2109,9 +2133,7 @@ function normalizeSpec(spec, index, defaults) {
     throw new Error(`workers_spec[${index}].sandbox must be one of: ${Array.from(VALID_SANDBOXES).join(", ")}.`);
   }
   const effort = spec.reasoning_effort || defaults.reasoning_effort;
-  if (effort !== undefined && effort !== null && !VALID_EFFORTS.has(effort)) {
-    throw new Error(`workers_spec[${index}].reasoning_effort must be one of: ${Array.from(VALID_EFFORTS).join(", ")}.`);
-  }
+  assertReasoningEffort(effort, `workers_spec[${index}].reasoning_effort`);
   const schema =
     spec.schema === null ? null : spec.schema && typeof spec.schema === "object" ? spec.schema : WORKER_SCHEMA;
   const cwd = spec.cwd ? path.resolve(spec.cwd) : defaults.cwd;
@@ -2138,9 +2160,7 @@ async function runExplicitWorkflow(input) {
     throw new Error(`sandbox must be one of: ${Array.from(VALID_SANDBOXES).join(", ")}.`);
   }
   const baseEffort = resolveReasoningEffort(input.reasoning_effort || input.reasoningEffort);
-  if (baseEffort !== undefined && baseEffort !== null && !VALID_EFFORTS.has(baseEffort)) {
-    throw new Error(`reasoning_effort must be one of: ${Array.from(VALID_EFFORTS).join(", ")}.`);
-  }
+  assertReasoningEffort(baseEffort, "reasoning_effort");
   const timeoutMs =
     input.timeout_ms === undefined || input.timeout_ms === null
       ? DEFAULT_TIMEOUT_MS
@@ -2206,7 +2226,7 @@ async function runExplicitWorkflow(input) {
       ...retryOpts.journal,
       ...transportJournal(transport, transportStrict)
     },
-    state_path: statePathFor(id),
+    state_path: statePathFor(id, input.codex_home),
     phases: Array.from(new Set(specs.map((spec) => spec.phase).filter(Boolean))),
     workers: specs.map((spec) => ({
       index: spec.index,
@@ -2320,7 +2340,7 @@ async function runWorkflow(input = {}) {
       ...retryOpts.journal,
       ...transportJournal(options.transport, options.transport_strict)
     },
-    state_path: statePathFor(id),
+    state_path: statePathFor(id, input.codex_home),
     workers: selectRoles(options.workers).map((worker) => ({
       ...worker,
       step_id: stepId({ kind: "role", role: worker.id, index: worker.index }),
@@ -2360,7 +2380,11 @@ async function runWorkflow(input = {}) {
 // Journaled resume: reload a persisted record, keep completed steps, and only
 // re-spawn missing / failed / explicitly-forced steps, then re-aggregate.
 async function resumeWorkflow(input = {}) {
-  const record = await readWorkflow({ workflow_id: input.workflow_id, state_path: input.state_path });
+  const record = await readWorkflow({
+    workflow_id: input.workflow_id,
+    state_path: input.state_path,
+    codex_home: input.codex_home
+  });
   if (!record || record.status === "missing") {
     throw new Error("No Ultracode workflow state to resume.");
   }
@@ -2608,9 +2632,7 @@ function compileSteps(steps, defaults) {
       throw new Error(`steps[${index}].sandbox must be one of: ${Array.from(VALID_SANDBOXES).join(", ")}.`);
     }
     const effort = raw.reasoning_effort || defaults.reasoning_effort;
-    if (effort !== undefined && effort !== null && !VALID_EFFORTS.has(effort)) {
-      throw new Error(`steps[${index}].reasoning_effort must be one of: ${Array.from(VALID_EFFORTS).join(", ")}.`);
-    }
+    assertReasoningEffort(effort, `steps[${index}].reasoning_effort`);
     const schema =
       raw.schema === null ? null : raw.schema && typeof raw.schema === "object" ? raw.schema : WORKER_SCHEMA;
     // Optional warm executor per step. Defaults to the step-set default (cold).
@@ -2965,9 +2987,7 @@ async function runPipelineSpec(input = {}) {
     throw new Error(`sandbox must be one of: ${Array.from(VALID_SANDBOXES).join(", ")}.`);
   }
   const baseEffort = resolveReasoningEffort(input.reasoning_effort || input.reasoningEffort);
-  if (baseEffort !== undefined && baseEffort !== null && !VALID_EFFORTS.has(baseEffort)) {
-    throw new Error(`reasoning_effort must be one of: ${Array.from(VALID_EFFORTS).join(", ")}.`);
-  }
+  assertReasoningEffort(baseEffort, "reasoning_effort");
   const timeoutMs =
     input.timeout_ms === undefined || input.timeout_ms === null
       ? DEFAULT_TIMEOUT_MS
@@ -3057,7 +3077,7 @@ async function runPipelineSpec(input = {}) {
       ...retryOpts.journal,
       ...transportJournal(transport, transportStrict)
     },
-    state_path: statePathFor(id),
+    state_path: statePathFor(id, input.codex_home),
     phases: Array.from(new Set(compiled.map((s) => s.phase).filter(Boolean))),
     steps: stepRecords,
     workers: stepRecords,
@@ -3095,8 +3115,6 @@ async function runPipelineSpec(input = {}) {
 module.exports = {
   MAX_WORKERS,
   DEFAULT_MAX_AGENTS,
-  DEFAULT_MODEL,
-  DEFAULT_REASONING_EFFORT,
   GPT_5_6_MODELS,
   GPT_5_6_REASONING_EFFORTS,
   WORKER_SCHEMA,

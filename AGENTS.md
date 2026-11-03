@@ -21,7 +21,7 @@ Ultracode is a Codex CLI plugin that gives Codex a parallel worker orchestration
 
 ## Runtime Behavior
 
-Ultracode workers are real Codex subprocesses, not mocked agents. Worker output is schema-validated when a schema is provided, usage is aggregated from Codex JSON events, and workflow state is written under `$CODEX_HOME/ultracode/runs/`.
+Ultracode workers are real Codex subprocesses, not mocked agents. Worker output is schema-validated when a schema is provided, usage is aggregated from Codex JSON events, and workflow state is written under `<codex home>/ultracode/runs/` — the `codex_home` option when given, else `$CODEX_HOME` (default `~/.codex`).
 
 Temporary schemas, last-message files, and isolated worktrees are created under the OS temp directory. They should not create tracked files in this repository.
 
@@ -31,8 +31,8 @@ The Workflow-script runner executes scripts in-process through the CLI. Do not a
 
 The suite runs entirely offline against a mock Codex binary. Tests must never call the real, paid `codex` CLI.
 
-- Run everything with `npm test` or directly with `node --test "test/**/*.test.js"`.
-- Run a single file with `node --test test/<file>.test.js`.
+- Run everything with `npm test`. It preloads `test/helpers/isolate-codex-home.js`, which points `CODEX_HOME` at a temp dir so run state never lands in the real `~/.codex`.
+- Run a single file with `node --test --require ./test/helpers/isolate-codex-home.js test/<file>.test.js`.
 - `test/fixtures/mock-codex.js` is the env-driven stand-in for `codex`.
 - Always set `CODEX_HOME` to a temp dir and point `CODEX_CLI_PATH` or `codex_bin` at the mock when running examples or tests.
 

@@ -56,14 +56,16 @@ node scripts/ultracode-cli.js @deep-research --args '{"topic":"Codex"}'
 
 ## Automatic updates
 
-Ultracode keeps itself fresh automatically. Before any command it runs
+Auto-update is **opt-in**: it reinstalls the plugin into the user's Codex home, so it never runs unless asked
+for. When enabled, before any command it runs
 `codex plugin marketplace upgrade <marketplace>` then `codex plugin add <plugin>@<marketplace>`, but **at most
 once per 24h** (tracked by a stamp file in the codex home) and **best-effort** — a failure (offline, marketplace
 down) never breaks the command; it only logs `[ultracode] auto-update skipped: …`. The refresh updates the
 installed cache for *future* Codex sessions; the current thread keeps the version it already loaded, so it never
 mutates the running command.
 
-- Opt out with `--no-auto-update` on any command, or `ULTRACODE_NO_AUTO_UPDATE=1` (or `ULTRACODE_AUTO_UPDATE=0`).
+- Opt in with `--auto-update` on any command, or `ULTRACODE_AUTO_UPDATE=1`. `--no-auto-update` /
+  `ULTRACODE_NO_AUTO_UPDATE=1` always win.
 - `marketplace`: marketplace name, default `just-every` (or `ULTRACODE_MARKETPLACE`).
 - `plugin`: plugin name, default from `.codex-plugin/plugin.json`.
 - `codex_bin`: Codex binary path (else `ULTRACODE_UPDATE_CODEX_BIN`, `CODEX_CLI_PATH`, or `codex`).
@@ -76,13 +78,16 @@ Fans out the built-in fixed reviewer roles in parallel and returns structured fi
 - `task`: natural-language objective (required unless `workers_spec` is given).
 - `cwd`: repository or workspace path. Use the current working directory when possible.
 - `workers`: 1-8. Use 3 for normal deep work, 5-6 for broad audits.
-- `model`: optional Codex model for child workers; defaults to `gpt-5.6-terra`. GPT-5.6 Codex workers use
+- `model`: optional Codex model for child workers. Unset means no `-m` override: workers use the model from the
+  user's Codex config (`~/.codex/config.toml`). GPT-5.6 Codex workers use
   `gpt-5.6-sol`, `gpt-5.6-terra`, or `gpt-5.6-luna`. Use Luna for efficient high-volume lanes, Terra for
   balanced work, and Sol for complex coding and reasoning. Do not use the API alias `gpt-5.6` with a
   ChatGPT-authenticated Codex CLI. Prefer per-`workers_spec`/step overrides when a workflow mixes cheap scout
   lanes with deeper verifier/writer lanes.
-- `reasoning_effort`: optional `none`, `low`, `medium`, `high`, `xhigh`, `max`, or `ultra` for GPT-5.6 Codex
-  workers; defaults to `medium`. Use `low` for latency-sensitive lanes, `medium` as the balanced starting point,
+- `reasoning_effort`: optional string passed to Codex as `model_reasoning_effort`; unset inherits the Codex
+  config. Accepted values depend on the model (GPT-5.6: `none`, `low`, `medium`, `high`, `xhigh`, `max`,
+  `ultra`; gpt-6.1-sol: `low`, `medium`, `high`, `xhigh`, `max`) and are not checked here —
+  an unsupported value fails the worker with Codex's 400 listing the accepted ones. Use `low` for latency-sensitive lanes, `medium` as the balanced starting point,
   `high` or `xhigh` when evaluation shows a quality gain, and reserve `max` or `ultra` for the hardest
   quality-first workloads.
 - `sandbox`: default `read-only`. Use `workspace-write` or `danger-full-access` only when the user explicitly
@@ -90,7 +95,9 @@ Fans out the built-in fixed reviewer roles in parallel and returns structured fi
 - `timeout_ms`: per-worker timeout (default 1,200,000 = 20 min; min 1000). The kill ladder is SIGTERM then
   SIGKILL after 5s.
 - `codex_bin`: optional Codex binary path (else `CODEX_CLI_PATH`, else app-bundle candidates / bare `codex`).
-- `codex_home`: optional `CODEX_HOME` for child workers (else inherited; defaults to `~/.codex`).
+- `codex_home`: optional `CODEX_HOME` for child workers (else inherited; defaults to `~/.codex`). The run's
+  journaled state (`ultracode/runs/`, `ultracode/scripts/`) lives in the same home, so pass it to `status` /
+  `resume` too.
 
 Orchestration controls (all optional, all backward-compatible):
 
@@ -100,7 +107,8 @@ Orchestration controls (all optional, all backward-compatible):
 - `budget_tokens`: best-effort total token budget — a pre-spawn gate checked when a worker is admitted, with
   usage accounted after each worker completes. New workers are skipped (and the cap logged) once exceeded, but
   with concurrency N up to N in-flight workers may still finish past the budget. A soft cap, not a hard
-  per-token kill switch. Default `null` (unbounded); shared across all spawns in the run.
+  per-token kill switch. Default `null` (unbounded); shared across all spawns in the run. Native runs meter
+  total tokens; Claude-compatible scripts meter output tokens and `agent()` throws once the budget is spent.
 - `max_agents`: lifetime cap on spawned workers for the run (default 1000).
 
 Transient-retry knobs (retries fire **only** on classified transient errors — HTTP 429/5xx, rate-limit,
@@ -131,7 +139,11 @@ the fixed roles (`runWorkflow` → `runExplicitWorkflow`; `record.options.explic
 - `prompt` (required): the worker's full instructions.
 - `label`: display label used in progress and aggregation.
 - `schema`: a JSON Schema object for this worker's output. Omit for the default `WORKER_SCHEMA`; pass `null`
-  for raw free-text. (A worked custom schema is in `cookbook.md`.)
+  for raw free-text. (A worked custom schema is in `cookbook.md`.) Codex enforces output schemas in strict
+  mode, so the engine sends a strict rewrite: every object gets `additionalProperties: false` (unless set) and
+  lists all properties as `required`, with originally-optional ones made nullable. Those `null`s are stripped
+  from the returned value, so you get the shape your own schema describes — no need to hand-write strict
+  schemas.
 - `sandbox`, `model`, `reasoning_effort`, `phase`, `timeout_ms`, `cwd`: per-worker overrides.
 - `isolation: "worktree"`: run a writable worker in an isolated git worktree (its diff is collected back).
 
@@ -192,6 +204,8 @@ one `ctx` (concurrency limiter, usage accumulator, `budget`, lifetime cap, progr
 
 - `spawnWorker(prompt, opts)` → one `codex exec` worker; returns `{status, value, result, usage, ...}`. With
   `opts.schema` it validates and retries once on mismatch; with `schema: null` it returns raw text. Never throws.
+  `effort` is accepted as an alias of `reasoning_effort` (the Claude Workflow spelling); an explicit
+  `reasoning_effort` wins.
 - `spawnWarmWorker(prompt, opts)` → like `spawnWorker` but returns a handle whose `.turn(prompt)` resumes the
   **same** warm Codex session (`executor: "resume"`); any resume the CLI cannot honor falls back to cold exec.
 - `runParallel(thunks, {ctx})` → barrier gather; a throwing thunk degrades to `null` (logged).
@@ -208,6 +222,10 @@ one `ctx` (concurrency limiter, usage accumulator, `budget`, lifetime cap, progr
 Plain async JavaScript with the engine primitives pre-bound into scope, so a multi-agent workflow reads like
 ordinary code with `await`, `map`/`filter`/`sort`, and arbitrary host-side reductions between agent calls. Drive
 it via `node scripts/ultracode-cli.js <path> --args '<json>'` (positional path, or `--path` / `--source`).
+
+Run-level `--model` / `--reasoning-effort` are the default for every worker the script spawns (`agent`,
+`spawnWorker`, `fanout`, `dag`, `loopUntilDry`, `adversarialVerify`, nested `workflow()`); a per-call `model`
+or `reasoning_effort` / `effort` wins, and with neither the worker inherits the Codex config.
 
 Bound scope (ctx is auto-injected — never pass it):
 
@@ -233,6 +251,8 @@ Bound scope (ctx is auto-injected — never pass it):
 - `budget` (`{ total, spent(), remaining() }`), `args`, `ctx`, `WORKER_SCHEMA`, `VERDICT_SCHEMA`.
 
 Top-level `await` and a top-level `return` (or top-level `export default <expr>`) become `record.result`.
+A script that returns normally is `status: "completed"`, or `status: "partial"` with `failed_workers: <n>`
+when any of its workers failed or was cancelled (those calls resolved to `null` inside the script).
 The journaled `kind: "script"` record is readable by `status`, updates while the script is running, and includes
 the dynamic worker records spawned by `agent`, `spawnWorker`, `loopUntilDry`, and `adversarialVerify`. See
 `examples/parallel-reduce.workflow.js`, `examples/budget-loop.workflow.js`,
@@ -252,15 +272,16 @@ Script records also include a source snapshot:
 - `definition_ref`: saved-workflow identity when run through the one command's `@name` / `--workflow <name>`
   input.
 
-`resume_from_run_id` / `resumeFromRunId` enables explicit cached-call reuse for scripts. Completed prior
-`agent()` / `spawnWorker()` calls are reused only when the deterministic prompt+options cache key matches; changed
-calls spawn live workers. This is narrower than full arbitrary-JS step resume.
+`resume_from_run_id` / `resumeFromRunId` replays the **unchanged prefix** of `agent()` / `spawnWorker()` calls
+(Claude Workflow semantics). Each call is matched on its deterministic prompt+options cache key; the first call
+with no match — a new or edited call — ends the prefix, and it plus every call started after it runs live, even
+if an identical call exists in the prior journal (its inputs may have changed upstream). N identical calls
+replay N distinct journaled results. A `cache prefix ended at call-N` log event marks where live work began.
 
-Unlike Claude Code's in-process Workflow scripts, the body runs as a plain (un-sandboxed) `AsyncFunction`, so
-`Date.now()`, `Math.random()`, and `new Date()` work normally — there is **no** determinism restriction. The
-one consequence to know: because reuse is keyed on a prompt+options hash, any volatile value you bake into a
-worker's *prompt* (a timestamp, a random id) changes that key and forces a live re-run on resume. Keep volatile
-values out of prompts — or pass them through `args` — when you want resume cache hits.
+Native scripts run as a plain (un-sandboxed) `AsyncFunction`, so `Date.now()`, `Math.random()`, and
+`new Date()` work — but any volatile value baked into a worker's *prompt* changes its cache key and ends the
+resume prefix there. Keep volatile values out of prompts — or pass them through `args`. Claude-compatible
+scripts are stricter (below).
 
 ## Saved workflow definitions (`workflow list|show|save|update|delete`)
 
@@ -285,8 +306,21 @@ node scripts/ultracode-cli.js workflow delete deep-research
 node scripts/ultracode-cli.js @deep-research --args '{"topic":"Codex"}'
 ```
 
-Running a saved definition (via `@name` / `--workflow <name>`) turns on strict Claude-compat diagnostics and
-adapters before execution. Allowed workflow primitive imports are rewritten to the bound runtime,
+Running a saved definition (via `@name` / `--workflow <name>`), or any script with `--claude-compat`, turns on
+strict Claude-compat diagnostics and adapters before execution, matching Claude's Workflow tool:
+
+- `agent()` without a `schema` returns the worker's final text instead of a `WORKER_SCHEMA` object.
+- The script runs in a fresh `node:vm` context with only ECMAScript built-ins and the bound primitives — no
+  `process`, `require`, timers, or `Buffer`. `Date.now()`, `Date()`, argless `new Date()`, and `Math.random()`
+  throw (they would break resume); `new Date(value)`, `Date.parse`, and `Date.UTC` work. The return value is
+  cloned out of the sandbox and must be structured-cloneable.
+- `budget` meters output tokens, and `agent()` throws once it is spent.
+- Claude-only options are reported in `record.warnings` (and a `claude-compat` log event): `agentType` has no
+  Codex equivalent and runs a default worker; a Claude `model` (`haiku`, `sonnet`, `opus`, `fable`,
+  `claude-*`) is dropped so the worker uses the Codex config's model. Codex model ids pass through.
+- An inline nested `workflow()` inherits compat mode.
+
+Allowed workflow primitive imports are rewritten to the bound runtime,
 `export async function run(context)` is invoked automatically, and direct workflow-side filesystem/shell/host
 access fails explicitly before workers spawn. The dashboard server also exposes definition
 list/show/save/update/delete/run endpoints, and the React UI shows the workflow library with source editing and

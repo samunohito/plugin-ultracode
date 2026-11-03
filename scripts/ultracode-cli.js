@@ -24,13 +24,21 @@ const NUMERIC_KEYS = new Set([
   "ui_port"
 ]);
 const JSON_KEYS = new Set(["workers_spec", "force_steps", "steps", "args"]);
-const BOOLEAN_KEYS = new Set(["ui", "retry_jitter", "transport_strict", "no_auto_update"]);
+const BOOLEAN_KEYS = new Set(["ui", "retry_jitter", "transport_strict", "auto_update", "no_auto_update", "claude_compat"]);
 // Switch flags that take no value — they must NOT consume the following token,
 // or a leading `--progress`/`--no-auto-update` would swallow the input positional.
-const ZERO_ARG_FLAGS = new Set(["progress", "no_ui", "no_auto_update", "no_cancel_on_sigint"]);
-// Auto-update is on by default but throttled: at most one marketplace refresh
-// per this interval (it only affects FUTURE Codex sessions, so per-command is
-// pointless). Best-effort — a failure never breaks the command.
+const ZERO_ARG_FLAGS = new Set([
+  "progress",
+  "no_ui",
+  "auto_update",
+  "no_auto_update",
+  "no_cancel_on_sigint",
+  "claude_compat"
+]);
+// Auto-update is opt-in (it reinstalls the plugin into the user's Codex home)
+// and throttled: at most one marketplace refresh per this interval (it only
+// affects FUTURE Codex sessions, so per-command is pointless). Best-effort — a
+// failure never breaks the command.
 const AUTO_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 // Wall-clock cap on the (best-effort) auto-update so a slow/hung marketplace
 // can never stall the command it precedes.
@@ -178,7 +186,8 @@ async function workflowCommand(options) {
     if (!source && (options.workflow_id || options.state_path || options.from_workflow_id)) {
       const record = await engine.readWorkflow({
         workflow_id: options.from_workflow_id || options.workflow_id,
-        state_path: options.state_path
+        state_path: options.state_path,
+        codex_home: options.codex_home
       });
       if (!record || record.status === "missing") throw new Error("No workflow record found to save.");
       const scriptPath = record.script_path || record.source_path;
@@ -225,13 +234,13 @@ async function workflowCommand(options) {
   );
 }
 
-function autoUpdateDisabled(options) {
-  if (options.no_auto_update === true) return true;
-  if (parseBool(process.env.ULTRACODE_NO_AUTO_UPDATE) === true) return true;
-  // ULTRACODE_AUTO_UPDATE=0/false is also an explicit opt-out.
-  const legacy = process.env.ULTRACODE_AUTO_UPDATE;
-  if (legacy !== undefined && parseBool(legacy) === false) return true;
-  return false;
+// Auto-update runs only when asked for (`--auto-update` or
+// ULTRACODE_AUTO_UPDATE=1). `--no-auto-update` / ULTRACODE_NO_AUTO_UPDATE=1
+// still win, so an existing opt-out keeps working.
+function autoUpdateEnabled(options) {
+  if (options.no_auto_update === true) return false;
+  if (parseBool(process.env.ULTRACODE_NO_AUTO_UPDATE) === true) return false;
+  return options.auto_update === true || parseBool(process.env.ULTRACODE_AUTO_UPDATE) === true;
 }
 
 function autoUpdateCodexHome(options) {
@@ -249,11 +258,13 @@ function autoUpdateStampPath(options) {
 // Best-effort, throttled auto-update. Runs on every command but does real work
 // at most once per AUTO_UPDATE_INTERVAL_MS, and NEVER throws — an update only
 // refreshes the plugin for future Codex sessions, so a failure (offline,
-// marketplace down) must not break the current run. Opt out with
-// --no-auto-update or ULTRACODE_NO_AUTO_UPDATE=1.
+// marketplace down) must not break the current run. Opt in with
+// --auto-update or ULTRACODE_AUTO_UPDATE=1.
 async function maybeAutoUpdatePlugin(options) {
-  delete options.auto_update; // the old opt-in flag is now the default; ignore it
-  if (autoUpdateDisabled(options)) return;
+  const enabled = autoUpdateEnabled(options);
+  delete options.auto_update;
+  delete options.no_auto_update;
+  if (!enabled) return;
   const stampPath = autoUpdateStampPath(options);
   try {
     const last = Number(JSON.parse(await fs.readFile(stampPath, "utf8")).ts);
@@ -451,4 +462,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { parseArgs, coerce, dispatchParse, classifyPositional, runJsonInput, autoUpdateDisabled };
+module.exports = { parseArgs, coerce, dispatchParse, classifyPositional, runJsonInput, autoUpdateEnabled };

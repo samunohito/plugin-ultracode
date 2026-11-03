@@ -70,18 +70,19 @@ node scripts/ultracode-cli.js examples/deep-research.workflow.js --progress \
 
 ## Updates
 
-Plugin installs are snapshot-based. Ultracode auto-refreshes the marketplace
-snapshot before commands, at most once every 24 hours, then reinstalls the
-plugin for future Codex sessions.
+Plugin installs are snapshot-based. When opted in, Ultracode refreshes the
+marketplace snapshot before commands, at most once every 24 hours, then
+reinstalls the plugin for future Codex sessions. It is off by default because it
+modifies the user's Codex home.
 
 The current Codex thread keeps the version it already loaded. Start a new thread
 after an update if you need the refreshed plugin code immediately.
 
-Opt out of the automatic refresh with either:
+Opt in to the automatic refresh with either:
 
 ```bash
-ULTRACODE_NO_AUTO_UPDATE=1 node scripts/ultracode-cli.js "review this change"
-node scripts/ultracode-cli.js "review this change" --no-auto-update
+ULTRACODE_AUTO_UPDATE=1 node scripts/ultracode-cli.js "review this change"
+node scripts/ultracode-cli.js "review this change" --auto-update
 ```
 
 ## Dashboard
@@ -116,11 +117,15 @@ Choose worker model and reasoning by task complexity:
 | Hard quality-first problem solving | `gpt-5.6-sol` | `xhigh`, `max`, or `ultra` |
 
 For ChatGPT-authenticated Codex CLI, use `gpt-5.6-sol`, `gpt-5.6-terra`, or
-`gpt-5.6-luna`; the API alias `gpt-5.6` is not available. The CLI accepts
-`none`, `low`, `medium`, `high`, `xhigh`, `max`, and `ultra` reasoning effort.
-Ultracode defaults to `gpt-5.6-terra` with `medium` reasoning. Override the
-default with `--model` and `--reasoning-effort`, or override individual workers
-and steps in `workers_spec[]`, `steps[]`, or workflow scripts.
+`gpt-5.6-luna`; the API alias `gpt-5.6` is not available. GPT-5.6 accepts
+`none`, `low`, `medium`, `high`, `xhigh`, `max`, and `ultra` reasoning effort;
+other models accept other values. Ultracode passes the value through and Codex
+rejects an unsupported one with an error listing the accepted values.
+Ultracode has no built-in model or reasoning default: unset workers inherit
+`model` / `model_reasoning_effort` from the user's Codex config. Set them for a
+whole run with `--model` and `--reasoning-effort` (for scripts, that is every
+worker's default), or override individual workers and steps in
+`workers_spec[]`, `steps[]`, or workflow scripts.
 
 ## Important Runtime Rules
 
@@ -170,10 +175,10 @@ CODEX_HOME=$(mktemp -d) \
 CODEX_CLI_PATH=test/fixtures/mock-codex.js \
 ULTRACODE_UI=0 \
 node scripts/ultracode-cli.js examples/parallel-reduce.workflow.js \
-  --args '{"files":["a.js","b.js","c.js"]}' \
-  --no-auto-update
+  --args '{"files":["a.js","b.js","c.js"]}'
 ```
 
-Generated run state lives under `$CODEX_HOME/ultracode/runs/`. Temporary
+Generated run state lives under `$CODEX_HOME/ultracode/runs/` (or the
+`--codex-home` directory when one is given). Temporary
 schemas, last-message files, and isolated worktrees are created under the OS
 temp directory and should not become tracked files.
