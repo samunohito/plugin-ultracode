@@ -105,7 +105,12 @@ async function startServer(runsDir, metaPath, input = {}) {
 
   const meta = await waitForMetadata(metaPath, DEFAULT_WAIT_MS);
   if (!meta || typeof meta.url !== "string") {
+    child.kill();
     throw new Error(`UI server did not publish metadata at ${metaPath}`);
+  }
+  if (!(await requestHealth(meta.url))) {
+    child.kill();
+    throw new Error(`UI server did not pass health check at ${meta.url}`);
   }
   return meta;
 }

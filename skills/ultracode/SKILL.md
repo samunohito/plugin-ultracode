@@ -79,6 +79,13 @@ schemas, or no verification.
 
 ## Operating rules
 
+- **Resolve the installed launcher.** From this skill's directory (`skills/ultracode/`), resolve
+  `../../scripts/ultracode-cli.js` and invoke its absolute path with `node`; do not assume an `ultracode`
+  command is on PATH or that the user's cwd is the plugin checkout. Examples below use `ultracode` as shorthand.
+- **Separate launcher permissions from worker sandboxing.** For the paired memories-db/read-only
+  app-server initialization failure, use host-approved launcher escalation (`require_escalated`) if necessary
+  and available; keep the worker sandbox (`read-only` by default). Never copy auth to tmp or overwrite
+  `CODEX_HOME`. Do not automatically retry escalation. See `references/cli.md` for diagnosis and UI recovery.
 - **Choose model and reasoning by task complexity.** When a run does not require a custom model mix, set the
   worker `model` and `reasoning_effort` deliberately instead of leaving complexity implicit. Unset workers
   inherit the user's Codex config:
@@ -121,7 +128,9 @@ schemas, or no verification.
   with Codex goals".)
 - **Surface the dashboard.** Leave the run UI on; the moment `ui.ready` fires (or from the final `record.ui.url`)
   open the URL in the Codex in-app browser, else print it as a plain clickable link so the user can watch the run
-  live. (Mechanics and flags: `references/cli.md`.)
+  live. A URL alone does not prove browser reachability: check server health and browser access separately.
+  If the server stops, recover with `status --ui --state-path <journal>` without executing workers; do not
+  infer why it stopped without evidence. (Mechanics and flags: `references/cli.md`.)
 
 ## Write the workflow
 
