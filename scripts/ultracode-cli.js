@@ -4,6 +4,7 @@
 const engine = require("./ultracode-engine");
 const fs = require("fs/promises");
 const path = require("path");
+const os = require("os");
 // Require the runner DIRECTLY (not via engine) to keep the script contract
 // clean and cycle-free (the runner requires the engine; the engine never
 // top-level-requires the runner).
@@ -187,6 +188,8 @@ async function workflowCommand(options) {
       const record = await engine.readWorkflow({
         workflow_id: options.from_workflow_id || options.workflow_id,
         state_path: options.state_path,
+        cwd: options.cwd,
+        state_dir: options.state_dir,
         codex_home: options.codex_home
       });
       if (!record || record.status === "missing") throw new Error("No workflow record found to save.");
@@ -251,7 +254,8 @@ function autoUpdateCodexHome(options) {
 function autoUpdateStampPath(options) {
   // Stable per-install location (codex home), NOT the per-command cwd.
   const home = autoUpdateCodexHome(options);
-  const dir = home ? path.join(home, "ultracode") : path.dirname(engine.stateDir());
+  const codexRoot = home || (process.env.CODEX_HOME && process.env.CODEX_HOME.trim()) || path.join(os.homedir(), ".codex");
+  const dir = path.join(codexRoot, "ultracode");
   return path.join(dir, "auto-update-check.json");
 }
 

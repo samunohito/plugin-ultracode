@@ -120,8 +120,7 @@ const VERDICT_SCHEMA = {
   required: ["refuted", "reason"]
 };
 
-// An explicit `codex_home` (option / --codex-home) wins over $CODEX_HOME, so a
-// run's workers AND its journaled state live in the same home.
+// Codex home is exclusively worker configuration/authentication.
 function codexHome(override) {
   if (typeof override === "string" && override.trim()) return override.trim();
   if (process.env.CODEX_HOME && process.env.CODEX_HOME.trim()) {
@@ -156,12 +155,17 @@ function defaultCodexBin() {
   return "codex";
 }
 
-function stateDir(home) {
-  return path.join(codexHome(home), "ultracode", "runs");
+const { stateRoot } = require("./state-storage");
+
+// Preserve the exported positional Codex-home API for legacy callers. Internal
+// callers use an options object so codex_home never selects workflow storage.
+function stateDir(options) {
+  if (typeof options === "string") return path.resolve(codexHome(options), "ultracode", "runs");
+  return path.join(stateRoot(options), "runs");
 }
 
-function statePathFor(id, home) {
-  return path.join(stateDir(home), `${id}.json`);
+function statePathFor(id, options) {
+  return path.join(stateDir(options), `${id}.json`);
 }
 
 function assertNonEmptyString(value, name) {
@@ -218,6 +222,7 @@ function normalizeOptions(input = {}) {
   return {
     task,
     cwd,
+    state_dir: stateRoot({ ...input, cwd }),
     workers: workerCount,
     sandbox,
     model: resolveModel(input.model),
@@ -293,14 +298,16 @@ async function readWorkflow(input = {}) {
   if (input.state_path) {
     filePath = path.resolve(assertNonEmptyString(input.state_path, "state_path"));
   } else if (input.workflow_id) {
-    filePath = statePathFor(assertNonEmptyString(input.workflow_id, "workflow_id"), input.codex_home);
+    filePath = statePathFor(assertNonEmptyString(input.workflow_id, "workflow_id"), input);
   } else {
-    filePath = await latestStatePath(input.codex_home);
+    filePath = await latestStatePath(input);
   }
   if (!filePath) {
     return { status: "missing", message: "No Ultracode workflow state exists yet." };
   }
   const record = await readJson(filePath);
+  record.state_path = filePath;
+  record.state_dir = path.dirname(path.dirname(filePath));
   const reconciled = reconcileRunningRecord(record);
   if (reconciled.changed) {
     await writeJson(filePath, reconciled.record);
@@ -2155,6 +2162,7 @@ function normalizeSpec(spec, index, defaults) {
 
 async function runExplicitWorkflow(input) {
   const cwd = path.resolve(input.cwd || process.cwd());
+  input = { ...input, cwd, state_dir: stateRoot({ ...input, cwd }) };
   const baseSandbox = input.sandbox || "read-only";
   if (!VALID_SANDBOXES.has(baseSandbox)) {
     throw new Error(`sandbox must be one of: ${Array.from(VALID_SANDBOXES).join(", ")}.`);
@@ -2226,7 +2234,8 @@ async function runExplicitWorkflow(input) {
       ...retryOpts.journal,
       ...transportJournal(transport, transportStrict)
     },
-    state_path: statePathFor(id, input.codex_home),
+    state_dir: stateRoot(input),
+    state_path: statePathFor(id, input),
     phases: Array.from(new Set(specs.map((spec) => spec.phase).filter(Boolean))),
     workers: specs.map((spec) => ({
       index: spec.index,
@@ -2301,6 +2310,7 @@ async function runWorkflow(input = {}) {
   }
 
   const options = normalizeOptions(input);
+  input = { ...input, cwd: options.cwd, state_dir: options.state_dir };
   const retryOpts = resolveRetryInput(input);
   const identity = workflowIdentity(input, "Worker Plan");
   const id = identity.id;
@@ -2340,7 +2350,8 @@ async function runWorkflow(input = {}) {
       ...retryOpts.journal,
       ...transportJournal(options.transport, options.transport_strict)
     },
-    state_path: statePathFor(id, input.codex_home),
+    state_dir: stateRoot(input),
+    state_path: statePathFor(id, input),
     workers: selectRoles(options.workers).map((worker) => ({
       ...worker,
       step_id: stepId({ kind: "role", role: worker.id, index: worker.index }),
@@ -2383,6 +2394,8 @@ async function resumeWorkflow(input = {}) {
   const record = await readWorkflow({
     workflow_id: input.workflow_id,
     state_path: input.state_path,
+    cwd: input.cwd,
+    state_dir: input.state_dir,
     codex_home: input.codex_home
   });
   if (!record || record.status === "missing") {
@@ -2445,6 +2458,9 @@ async function resumeWorkflow(input = {}) {
   const baseOptions = normalizeOptions({
     task: record.task,
     cwd: record.cwd,
+    state_dir: record.state_dir,
+    codex_bin: input.codex_bin,
+    codex_home: input.codex_home,
     workers: (record.options && record.options.workers) || 1,
     sandbox: (record.options && record.options.sandbox) || "read-only",
     model: record.options && record.options.model,
@@ -2464,6 +2480,8 @@ async function resumeWorkflow(input = {}) {
             reasoningEffort: worker.spec.reasoning_effort || undefined,
             timeoutMs: worker.spec.timeout_ms,
             cwd: worker.spec.cwd,
+            codex_bin: baseOptions.codex_bin,
+            codex_home: baseOptions.codex_home,
             label: worker.label,
             phase: worker.phase,
             isolation: worker.spec.isolation || undefined,
@@ -2982,6 +3000,7 @@ async function runDagOnCtx(compiled, ctx, opts = {}) {
 
 async function runPipelineSpec(input = {}) {
   const cwd = path.resolve(input.cwd || process.cwd());
+  input = { ...input, cwd, state_dir: stateRoot({ ...input, cwd }) };
   const baseSandbox = input.sandbox || "read-only";
   if (!VALID_SANDBOXES.has(baseSandbox)) {
     throw new Error(`sandbox must be one of: ${Array.from(VALID_SANDBOXES).join(", ")}.`);
@@ -3077,7 +3096,8 @@ async function runPipelineSpec(input = {}) {
       ...retryOpts.journal,
       ...transportJournal(transport, transportStrict)
     },
-    state_path: statePathFor(id, input.codex_home),
+    state_dir: stateRoot(input),
+    state_path: statePathFor(id, input),
     phases: Array.from(new Set(compiled.map((s) => s.phase).filter(Boolean))),
     steps: stepRecords,
     workers: stepRecords,

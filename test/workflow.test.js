@@ -135,7 +135,7 @@ test("ui workflow persists worker starts before first completion", async () => {
         })
       );
 
-      const runsDir = path.join(home, "ultracode", "runs");
+      const runsDir = engine.stateDir();
       let midFlight = null;
       for (let i = 0; i < 80; i += 1) {
         await new Promise((resolve) => setTimeout(resolve, 25));

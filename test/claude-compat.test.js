@@ -176,15 +176,15 @@ test("claude_compat: an inline nested workflow() inherits Claude semantics", asy
 });
 
 // ---------------------------------------------------------------------------
-// Run state follows an explicit codex_home.
+// Run state is independent of codex_home.
 // ---------------------------------------------------------------------------
 
-test("an explicit codex_home holds the run state, and status/resume read it back", async () => {
-  const opts = baseOpts();
+test("state_dir holds run state independently of codex_home; status/resume read it back", async () => {
+  const opts = baseOpts({ state_dir: freshTmpDir("compat-state-") });
   const rec = await runScript({ source: "await agent('a', { schema: null }); return 1;", ...opts });
-  assert.strictEqual(path.dirname(rec.state_path), path.join(opts.codex_home, "ultracode", "runs"));
-  assert.ok(rec.script_path.startsWith(path.join(opts.codex_home, "ultracode", "scripts")));
-  const read = await engine.readWorkflow({ workflow_id: rec.id, codex_home: opts.codex_home });
+  assert.strictEqual(path.dirname(rec.state_path), path.join(opts.state_dir, "runs"));
+  assert.ok(rec.script_path.startsWith(path.join(opts.state_dir, "scripts")));
+  const read = await engine.readWorkflow({ workflow_id: rec.id, state_dir: opts.state_dir });
   assert.strictEqual(read.id, rec.id);
   const missing = await engine.readWorkflow({ workflow_id: rec.id }).catch((error) => error);
   assert.ok(missing instanceof Error, "the default home does not have this run");

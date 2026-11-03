@@ -172,13 +172,18 @@ spawning real workers:
 
 ```bash
 CODEX_HOME=$(mktemp -d) \
+ULTRACODE_STATE_DIR=$(mktemp -d) \
 CODEX_CLI_PATH=test/fixtures/mock-codex.js \
 ULTRACODE_UI=0 \
 node scripts/ultracode-cli.js examples/parallel-reduce.workflow.js \
   --args '{"files":["a.js","b.js","c.js"]}'
 ```
 
-Generated run state lives under `$CODEX_HOME/ultracode/runs/` (or the
-`--codex-home` directory when one is given). Temporary
+Generated run state defaults to `<workflow cwd>/.codex/ultracode/runs/`.
+Set `--state-dir` or `ULTRACODE_STATE_DIR` to choose the root containing
+`runs/`, `scripts/`, and `ui/`; relative roots resolve against workflow cwd.
+`CODEX_HOME` / `--codex-home` still selects worker authentication and configuration.
+To read old journals, use `--state-dir <old codex home>/ultracode`.
+Temporary
 schemas, last-message files, and isolated worktrees are created under the OS
 temp directory and should not become tracked files.

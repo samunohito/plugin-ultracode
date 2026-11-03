@@ -102,7 +102,7 @@ test("runWorkflow ui:true launches the dashboard server and serves the workflow 
       assert.ok(events.some((event) => event.type === "ui.ready" && event.url === record.ui.url));
 
       const metaPath = metadataPathForRunsDir(path.dirname(record.state_path));
-      assert.ok(metaPath.endsWith(path.join("ultracode", "ui", "server.json")));
+      assert.strictEqual(metaPath, path.join(record.state_dir, "ui", "server.json"));
 
       const health = await fetchJson(`${record.ui.server_url}/api/health`);
       assert.strictEqual(health.ok, true);
@@ -292,6 +292,7 @@ test("dashboard API updates, runs, and deletes saved workflow definitions", asyn
     try {
       const record = await runScript({
         source: 'export const meta = { name: "Library Host" }; return { ok: true };',
+        state_dir: path.join(home, "selected-state"),
         cwd: home,
         codex_bin: MOCK,
         codex_home: home,
@@ -323,6 +324,8 @@ test("dashboard API updates, runs, and deletes saved workflow definitions", asyn
       assert.strictEqual(launched.started, true);
       assert.strictEqual(launched.status, "completed");
       assert.deepStrictEqual(launched.record.result, { updated: 42 });
+      assert.strictEqual(launched.record.state_dir, record.state_dir);
+      assert.strictEqual(path.dirname(launched.record.state_path), path.dirname(record.state_path));
 
       const deleted = await deleteJson(`${record.ui.server_url}/api/workflow-definitions/library-run`);
       assert.strictEqual(deleted.deleted, true);

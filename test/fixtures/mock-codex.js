@@ -121,7 +121,7 @@ function recordInvocation(extra) {
   try {
     fs.mkdirSync(dir, { recursive: true });
     const subcommand = isAppServer ? "app-server" : isResume ? "resume" : "exec";
-    const entry = { subcommand, argv, ...extra };
+    const entry = { subcommand, argv, codex_home: process.env.CODEX_HOME, ...extra };
     fs.appendFileSync(path.join(dir, "invocations.log"), JSON.stringify(entry) + "\n", "utf8");
   } catch {
     /* best effort */

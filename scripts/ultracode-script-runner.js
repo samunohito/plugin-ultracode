@@ -22,7 +22,7 @@
 // runScript() compiles the workflow body with AsyncFunction in the host CLI
 // process. The transform is ergonomic: it provides top-level await, captures a
 // top-level return value, binds Ultracode primitives, and journals script output
-// into the usual run record under CODEX_HOME/ultracode/runs.
+// into the workflow state root's runs/ directory.
 // ===========================================================================
 
 const fs = require("fs/promises");
@@ -44,6 +44,7 @@ const workflowDefinitions = require("./workflow-definitions");
 // NOT top-level require this runner (it uses a lazy require wrapper), so there
 // is no require cycle. See ultracode-engine.js runScript re-export.
 const engine = require("./ultracode-engine");
+const { stateRoot } = require("./state-storage");
 
 // ---------------------------------------------------------------------------
 // Local persistence helper. Script ids come from the engine's workflowIdentity()
@@ -62,14 +63,14 @@ async function writeText(filePath, value) {
   await fs.writeFile(filePath, value.endsWith("\n") ? value : `${value}\n`, "utf8");
 }
 
-function scriptSnapshotPathFor(id, home) {
-  return path.join(path.dirname(engine.stateDir(home)), "scripts", `${id}.workflow.js`);
+function scriptSnapshotPathFor(id, options) {
+  return path.join(path.dirname(engine.stateDir(options)), "scripts", `${id}.workflow.js`);
 }
 
 async function readResumeRecord(input) {
   const id = input.resume_from_run_id || input.resumeFromRunId;
-  if (!id) return null;
-  const record = await engine.readWorkflow({ workflow_id: id, codex_home: input.codex_home });
+  if (!id && !input.state_path) return null;
+  const record = await engine.readWorkflow({ ...input, workflow_id: id });
   if (!record || record.status === "missing") {
     throw new Error(`resume_from_run_id "${id}" was not found.`);
   }
@@ -543,6 +544,7 @@ function buildScope(ctx, input, hooks = {}) {
     // explicit by passing { path } / { source }.
     const nested = {
       args: workflowArgs,
+      state_dir: input.state_dir,
       cwd: input.cwd,
       concurrency: input.concurrency,
       budget_tokens: input.budget_tokens,
@@ -662,11 +664,12 @@ async function runScript(input = {}) {
   const meta = extractClaudeWorkflowMeta(source);
   const hash = sourceHash(source);
   const resumeRecord = await readResumeRecord(input);
+  input = { ...input, cwd, state_dir: resumeRecord ? resumeRecord.state_dir : stateRoot({ ...input, cwd }) };
   const resumeCache = cacheableWorkerMap(resumeRecord);
 
   const identity = engine.workflowIdentity({ ...input, name: input.name || (meta && meta.name) }, "Script Run");
   const id = identity.id;
-  const scriptPath = scriptSnapshotPathFor(id, input.codex_home);
+  const scriptPath = scriptSnapshotPathFor(id, input);
   let record = null;
   let persister = null;
   let ctx = null;
@@ -716,7 +719,7 @@ async function runScript(input = {}) {
   });
 
   const startedAt = new Date().toISOString();
-  const statePath = engine.statePathFor(id, input.codex_home);
+  const statePath = engine.statePathFor(id, input);
 
   record = {
     id,
@@ -740,6 +743,7 @@ async function runScript(input = {}) {
       max_delay_ms: input.max_delay_ms === undefined ? null : input.max_delay_ms,
       retry_jitter: input.retry_jitter === undefined ? null : input.retry_jitter
     },
+    state_dir: input.state_dir,
     state_path: statePath,
     source_path: sourcePath,
     script_path: scriptPath,
