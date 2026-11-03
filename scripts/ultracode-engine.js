@@ -32,8 +32,12 @@ const VALID_SANDBOXES = new Set(["read-only", "workspace-write", "danger-full-ac
 // does not set them passes no `-m` / `model_reasoning_effort` override, so it
 // inherits whatever the user's Codex config (`~/.codex/config.toml`) selects.
 const GPT_5_6_MODELS = Object.freeze(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]);
+// Known GPT-5.6 values, kept for reference and tests only. Reasoning effort is
+// NOT validated against a list: supported values differ per model (gpt-6.1-sol
+// accepts only low..max, without `none` or `ultra`), and Codex rejects an
+// unsupported value with an explicit 400 naming the accepted ones before the
+// model runs.
 const GPT_5_6_REASONING_EFFORTS = Object.freeze(["none", "low", "medium", "high", "xhigh", "max", "ultra"]);
-const VALID_EFFORTS = new Set(GPT_5_6_REASONING_EFFORTS);
 // Worker transports. 'exec' (default) = today's `codex exec --json` JSONL
 // scraping, byte-for-byte unchanged. 'app-server' = opt-in versioned JSON-RPC
 // app-server transport (with automatic fallback to exec). 'exec-server' = a
@@ -184,6 +188,15 @@ function resolveReasoningEffort(value) {
   return value || undefined;
 }
 
+// Shape check only: which values a model accepts is Codex's call (see
+// GPT_5_6_REASONING_EFFORTS).
+function assertReasoningEffort(value, name) {
+  if (value === undefined || value === null) return;
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`${name} must be a non-empty string.`);
+  }
+}
+
 function normalizeOptions(input = {}) {
   const task = assertNonEmptyString(input.task, "task");
   const cwd = path.resolve(input.cwd || process.cwd());
@@ -193,9 +206,7 @@ function normalizeOptions(input = {}) {
     throw new Error(`sandbox must be one of: ${Array.from(VALID_SANDBOXES).join(", ")}.`);
   }
   const reasoningEffort = resolveReasoningEffort(input.reasoning_effort || input.reasoningEffort);
-  if (reasoningEffort !== undefined && !VALID_EFFORTS.has(reasoningEffort)) {
-    throw new Error(`reasoning_effort must be one of: ${Array.from(VALID_EFFORTS).join(", ")}.`);
-  }
+  assertReasoningEffort(reasoningEffort, "reasoning_effort");
   const timeoutMs =
     input.timeout_ms === undefined || input.timeout_ms === null
       ? DEFAULT_TIMEOUT_MS
@@ -1002,9 +1013,7 @@ function resolveWorkerOpts(opts = {}) {
     throw new Error(`sandbox must be one of: ${Array.from(VALID_SANDBOXES).join(", ")}.`);
   }
   const reasoningEffort = resolveReasoningEffort(opts.reasoningEffort || opts.reasoning_effort);
-  if (reasoningEffort !== undefined && reasoningEffort !== null && !VALID_EFFORTS.has(reasoningEffort)) {
-    throw new Error(`reasoning_effort must be one of: ${Array.from(VALID_EFFORTS).join(", ")}.`);
-  }
+  assertReasoningEffort(reasoningEffort, "reasoning_effort");
   const schema = opts.schema === undefined ? WORKER_SCHEMA : opts.schema;
   // Warm-context executor selection. 'cold' (default) = unchanged cold exec
   // fan-out. 'resume' = keep a Codex session warm across turns via
@@ -1785,7 +1794,7 @@ async function loopUntilDry(makePrompt, opts = {}) {
       schema,
       sandbox: opts.sandbox,
       model: opts.model,
-      reasoningEffort: opts.reasoningEffort,
+      reasoningEffort: firstDefined(opts.reasoningEffort, opts.reasoning_effort),
       timeoutMs: opts.timeoutMs || opts.timeout_ms,
       cwd: opts.cwd,
       codex_bin: opts.codex_bin,
@@ -1875,7 +1884,7 @@ async function adversarialVerify(findings, opts = {}) {
             schema,
             sandbox: opts.sandbox || "read-only",
             model: opts.model,
-            reasoningEffort: opts.reasoningEffort,
+            reasoningEffort: firstDefined(opts.reasoningEffort, opts.reasoning_effort),
             timeoutMs: opts.timeoutMs || opts.timeout_ms,
             cwd: opts.cwd,
             codex_bin: opts.codex_bin,
@@ -2124,9 +2133,7 @@ function normalizeSpec(spec, index, defaults) {
     throw new Error(`workers_spec[${index}].sandbox must be one of: ${Array.from(VALID_SANDBOXES).join(", ")}.`);
   }
   const effort = spec.reasoning_effort || defaults.reasoning_effort;
-  if (effort !== undefined && effort !== null && !VALID_EFFORTS.has(effort)) {
-    throw new Error(`workers_spec[${index}].reasoning_effort must be one of: ${Array.from(VALID_EFFORTS).join(", ")}.`);
-  }
+  assertReasoningEffort(effort, `workers_spec[${index}].reasoning_effort`);
   const schema =
     spec.schema === null ? null : spec.schema && typeof spec.schema === "object" ? spec.schema : WORKER_SCHEMA;
   const cwd = spec.cwd ? path.resolve(spec.cwd) : defaults.cwd;
@@ -2153,9 +2160,7 @@ async function runExplicitWorkflow(input) {
     throw new Error(`sandbox must be one of: ${Array.from(VALID_SANDBOXES).join(", ")}.`);
   }
   const baseEffort = resolveReasoningEffort(input.reasoning_effort || input.reasoningEffort);
-  if (baseEffort !== undefined && baseEffort !== null && !VALID_EFFORTS.has(baseEffort)) {
-    throw new Error(`reasoning_effort must be one of: ${Array.from(VALID_EFFORTS).join(", ")}.`);
-  }
+  assertReasoningEffort(baseEffort, "reasoning_effort");
   const timeoutMs =
     input.timeout_ms === undefined || input.timeout_ms === null
       ? DEFAULT_TIMEOUT_MS
@@ -2627,9 +2632,7 @@ function compileSteps(steps, defaults) {
       throw new Error(`steps[${index}].sandbox must be one of: ${Array.from(VALID_SANDBOXES).join(", ")}.`);
     }
     const effort = raw.reasoning_effort || defaults.reasoning_effort;
-    if (effort !== undefined && effort !== null && !VALID_EFFORTS.has(effort)) {
-      throw new Error(`steps[${index}].reasoning_effort must be one of: ${Array.from(VALID_EFFORTS).join(", ")}.`);
-    }
+    assertReasoningEffort(effort, `steps[${index}].reasoning_effort`);
     const schema =
       raw.schema === null ? null : raw.schema && typeof raw.schema === "object" ? raw.schema : WORKER_SCHEMA;
     // Optional warm executor per step. Defaults to the step-set default (cold).
@@ -2984,9 +2987,7 @@ async function runPipelineSpec(input = {}) {
     throw new Error(`sandbox must be one of: ${Array.from(VALID_SANDBOXES).join(", ")}.`);
   }
   const baseEffort = resolveReasoningEffort(input.reasoning_effort || input.reasoningEffort);
-  if (baseEffort !== undefined && baseEffort !== null && !VALID_EFFORTS.has(baseEffort)) {
-    throw new Error(`reasoning_effort must be one of: ${Array.from(VALID_EFFORTS).join(", ")}.`);
-  }
+  assertReasoningEffort(baseEffort, "reasoning_effort");
   const timeoutMs =
     input.timeout_ms === undefined || input.timeout_ms === null
       ? DEFAULT_TIMEOUT_MS

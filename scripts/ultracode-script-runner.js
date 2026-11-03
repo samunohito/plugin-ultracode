@@ -176,6 +176,23 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 // Claude model ids and tier aliases (`claude-sonnet-…`, `haiku`, `opus`, …).
 const CLAUDE_MODEL_RE = /^(?:claude[-\w.]*|(?:us\.)?anthropic\.[-\w.:]+|haiku|sonnet|opus|fable)(?:\[1m\])?$/i;
 
+// Collapse the reasoning-effort spellings — `reasoningEffort`, `reasoning_effort`,
+// and Claude's `effort`, in that precedence — into `reasoningEffort`, and drop
+// undefined options, so a per-call value always overrides a run default and an
+// unset one (`fanout({ model: undefined })`) never erases it.
+function normalizeOptionKeys(opts) {
+  const out = {};
+  for (const [key, value] of Object.entries(opts || {})) {
+    if (value !== undefined) out[key] = value;
+  }
+  const effort = [out.reasoningEffort, out.reasoning_effort, out.effort].find((value) => value !== undefined && value !== null);
+  delete out.reasoning_effort;
+  delete out.effort;
+  if (effort !== undefined) out.reasoningEffort = effort;
+  else delete out.reasoningEffort;
+  return out;
+}
+
 function errorMessage(error) {
   return error && typeof error.message === "string" ? error.message : String(error);
 }
@@ -226,6 +243,11 @@ function buildScope(ctx, input, hooks = {}) {
     spawnDefaults.codex_home = input.codex_home.trim();
   }
   if (input.cwd) spawnDefaults.cwd = input.cwd;
+  // Run-level --model / --reasoning-effort are every worker's defaults; a
+  // per-call option wins, and with neither the worker inherits the Codex config.
+  if (typeof input.model === "string" && input.model.trim()) spawnDefaults.model = input.model.trim();
+  const runEffort = input.reasoningEffort || input.reasoning_effort;
+  if (runEffort) spawnDefaults.reasoningEffort = runEffort;
 
   // spawnWorker(prompt, opts?) -> FULL engine record {status,value,usage,...}.
   // ctx + phase defaults are injected; never throws (engine resolves a failure
@@ -237,16 +259,9 @@ function buildScope(ctx, input, hooks = {}) {
   const warn = typeof hooks.warn === "function" ? hooks.warn : () => {};
 
   function normalizeWorkerOpts(opts = {}) {
-    const normalized = { ...(opts || {}) };
+    const normalized = normalizeOptionKeys(opts);
     if (normalized.agentType && !normalized.label) normalized.label = String(normalized.agentType);
     if (normalized.name && !normalized.label) normalized.label = String(normalized.name);
-    // `effort` is the Claude Workflow spelling of reasoning_effort.
-    if (normalized.effort !== undefined) {
-      if (normalized.reasoning_effort === undefined && normalized.reasoningEffort === undefined) {
-        normalized.reasoning_effort = normalized.effort;
-      }
-      delete normalized.effort;
-    }
     if (claudeCompat) {
       if (normalized.schema === undefined) normalized.schema = null;
       // Claude subagent types and Claude models have no Codex counterpart. The
@@ -256,7 +271,7 @@ function buildScope(ctx, input, hooks = {}) {
         warn(`agentType "${normalized.agentType}" has no Codex equivalent; it ran as a default Codex worker.`);
       }
       if (typeof normalized.model === "string" && CLAUDE_MODEL_RE.test(normalized.model.trim())) {
-        warn(`model "${normalized.model}" is a Claude model; it ran on the model from the Codex config instead.`);
+        warn(`model "${normalized.model}" is a Claude model; it ran on the run's default model instead.`);
         delete normalized.model;
       }
     }
@@ -405,11 +420,16 @@ function buildScope(ctx, input, hooks = {}) {
   }
 
   function loopUntilDry(makePrompt, opts = {}) {
-    return engine.loopUntilDry(makePrompt, { ...spawnDefaults, phase: currentPhase, ...opts, ctx });
+    return engine.loopUntilDry(makePrompt, { ...spawnDefaults, phase: currentPhase, ...normalizeOptionKeys(opts), ctx });
   }
 
   function adversarialVerify(findings, opts = {}) {
-    return engine.adversarialVerify(findings, { ...spawnDefaults, phase: currentPhase, ...opts, ctx });
+    return engine.adversarialVerify(findings, {
+      ...spawnDefaults,
+      phase: currentPhase,
+      ...normalizeOptionKeys(opts),
+      ctx
+    });
   }
 
   // fanout(taskOrSpecs, opts?) -> ONE bounded barrier of workers (the old `run`
@@ -536,6 +556,8 @@ function buildScope(ctx, input, hooks = {}) {
       on_event: ctx.onEvent || undefined,
       codex_bin: spawnDefaults.codex_bin,
       codex_home: spawnDefaults.codex_home,
+      model: spawnDefaults.model,
+      reasoning_effort: spawnDefaults.reasoningEffort,
       // A Claude-compatible parent keeps Claude semantics in its children.
       ...(claudeCompat ? { claude_compat: true } : {})
     };

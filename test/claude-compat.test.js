@@ -130,8 +130,8 @@ test("claude_compat: Claude models and agentType are reported and the Codex conf
   assert.strictEqual(rec.status, "completed");
   assert.deepStrictEqual(rec.warnings, [
     'agentType "code-reviewer" has no Codex equivalent; it ran as a default Codex worker.',
-    'model "haiku" is a Claude model; it ran on the model from the Codex config instead.',
-    'model "claude-sonnet-5-5" is a Claude model; it ran on the model from the Codex config instead.'
+    `model "haiku" is a Claude model; it ran on the run's default model instead.`,
+    `model "claude-sonnet-5-5" is a Claude model; it ran on the run's default model instead.`
   ]);
   const argvs = readInvocations(sessionDir).map(({ argv }) => argv);
   assert.strictEqual(argvs.filter((argv) => argv.includes("-m")).length, 1, "only the Codex model is passed");

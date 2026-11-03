@@ -117,12 +117,15 @@ Choose worker model and reasoning by task complexity:
 | Hard quality-first problem solving | `gpt-5.6-sol` | `xhigh`, `max`, or `ultra` |
 
 For ChatGPT-authenticated Codex CLI, use `gpt-5.6-sol`, `gpt-5.6-terra`, or
-`gpt-5.6-luna`; the API alias `gpt-5.6` is not available. The CLI accepts
-`none`, `low`, `medium`, `high`, `xhigh`, `max`, and `ultra` reasoning effort.
+`gpt-5.6-luna`; the API alias `gpt-5.6` is not available. GPT-5.6 accepts
+`none`, `low`, `medium`, `high`, `xhigh`, `max`, and `ultra` reasoning effort;
+other models accept other values. Ultracode passes the value through and Codex
+rejects an unsupported one with an error listing the accepted values.
 Ultracode has no built-in model or reasoning default: unset workers inherit
 `model` / `model_reasoning_effort` from the user's Codex config. Set them for a
-whole run with `--model` and `--reasoning-effort`, or override individual
-workers and steps in `workers_spec[]`, `steps[]`, or workflow scripts.
+whole run with `--model` and `--reasoning-effort` (for scripts, that is every
+worker's default), or override individual workers and steps in
+`workers_spec[]`, `steps[]`, or workflow scripts.
 
 ## Important Runtime Rules
 

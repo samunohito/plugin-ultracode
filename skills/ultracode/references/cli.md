@@ -84,8 +84,10 @@ Fans out the built-in fixed reviewer roles in parallel and returns structured fi
   balanced work, and Sol for complex coding and reasoning. Do not use the API alias `gpt-5.6` with a
   ChatGPT-authenticated Codex CLI. Prefer per-`workers_spec`/step overrides when a workflow mixes cheap scout
   lanes with deeper verifier/writer lanes.
-- `reasoning_effort`: optional `none`, `low`, `medium`, `high`, `xhigh`, `max`, or `ultra` for GPT-5.6 Codex
-  workers; unset inherits `model_reasoning_effort` from the Codex config. Use `low` for latency-sensitive lanes, `medium` as the balanced starting point,
+- `reasoning_effort`: optional string passed to Codex as `model_reasoning_effort`; unset inherits the Codex
+  config. Accepted values depend on the model (GPT-5.6: `none`, `low`, `medium`, `high`, `xhigh`, `max`,
+  `ultra`; gpt-6.1-sol: `low`, `medium`, `high`, `xhigh`, `max`) and are not checked here —
+  an unsupported value fails the worker with Codex's 400 listing the accepted ones. Use `low` for latency-sensitive lanes, `medium` as the balanced starting point,
   `high` or `xhigh` when evaluation shows a quality gain, and reserve `max` or `ultra` for the hardest
   quality-first workloads.
 - `sandbox`: default `read-only`. Use `workspace-write` or `danger-full-access` only when the user explicitly
@@ -220,6 +222,10 @@ one `ctx` (concurrency limiter, usage accumulator, `budget`, lifetime cap, progr
 Plain async JavaScript with the engine primitives pre-bound into scope, so a multi-agent workflow reads like
 ordinary code with `await`, `map`/`filter`/`sort`, and arbitrary host-side reductions between agent calls. Drive
 it via `node scripts/ultracode-cli.js <path> --args '<json>'` (positional path, or `--path` / `--source`).
+
+Run-level `--model` / `--reasoning-effort` are the default for every worker the script spawns (`agent`,
+`spawnWorker`, `fanout`, `dag`, `loopUntilDry`, `adversarialVerify`, nested `workflow()`); a per-call `model`
+or `reasoning_effort` / `effort` wins, and with neither the worker inherits the Codex config.
 
 Bound scope (ctx is auto-injected — never pass it):
 
