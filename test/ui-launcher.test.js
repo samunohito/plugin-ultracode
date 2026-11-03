@@ -335,3 +335,183 @@ test("dashboard API updates, runs, and deletes saved workflow definitions", asyn
     }
   });
 });
+
+// Explicit status UI recovery regressions.
+function status(home, args = [], preload) {
+  const result = childProcess.spawnSync(process.execPath, [
+    ...(preload ? ["--require", preload] : []), CLI, "status", ...args
+  ], {
+    cwd: home,
+    env: {
+      ...process.env,
+      CODEX_CLI_PATH: MOCK,
+      ULTRACODE_UI: "1",
+      ULTRACODE_NO_AUTO_UPDATE: "1",
+      MOCK_CODEX_SESSION_DIR: path.join(home, "status-worker-sessions")
+    },
+    encoding: "utf8"
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(fs.existsSync(path.join(home, "status-worker-sessions")), false, "status must not run workers");
+  return JSON.parse(result.stdout);
+}
+
+async function stop(pid) {
+  if (!pid) return;
+  try { process.kill(pid, "SIGTERM"); } catch { return; }
+  for (let i = 0; i < 100; i++) {
+    try { process.kill(pid, 0); } catch { return; }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  try { process.kill(pid, "SIGKILL"); } catch {}
+}
+
+async function fixture(home) {
+  return engine.runWorkflow({
+    workers_spec: [{ label: "recovery", prompt: "return a result", schema: null }],
+    cwd: home, state_dir: path.join(home, "original"), codex_bin: MOCK, codex_home: home, ui: false
+  });
+}
+
+function withoutUi(record) {
+  const { ui, events, ...rest } = record;
+  return rest;
+}
+
+async function cleanupServer(metaPath) {
+  if (fs.existsSync(metaPath)) await stop(JSON.parse(fs.readFileSync(metaPath)).pid);
+}
+
+test("status --ui recovers a stopped dashboard from the actual journal and reuses a healthy server", async () => {
+  await withCodexHome(async (home) => {
+    const record = await fixture(home);
+    const runsDir = path.dirname(record.state_path);
+    const metaPath = metadataPathForRunsDir(runsDir);
+    try {
+      const oldServer = await ensureUiServer(runsDir);
+      record.ui = { status: "ready", url: `${oldServer.url}/stale`, server_pid: oldServer.pid };
+      fs.writeFileSync(record.state_path, JSON.stringify(record));
+      await stop(oldServer.pid);
+      const args = ["--state-path", record.state_path, "--state-dir", path.join(home, "different"), "--ui"];
+      const recovered = status(home, args);
+      assert.equal(recovered.ui.status, "ready");
+      assert.notEqual(recovered.ui.server_pid, oldServer.pid);
+      assert.notEqual(recovered.ui.url, record.ui.url);
+      assert.equal(recovered.ui.state_path, record.state_path);
+      assert.equal((await fetch(`${recovered.ui.server_url}/api/health`)).status, 200);
+      assert.deepStrictEqual(withoutUi(recovered), withoutUi(record), "workflow results and status remain unchanged");
+      assert.deepStrictEqual(recovered.events.slice(0, -1), record.events);
+      assert.equal(recovered.events.at(-1).type, "ui.ready");
+      assert.deepStrictEqual(JSON.parse(fs.readFileSync(record.state_path)), recovered);
+      const served = await (await fetch(`${recovered.ui.server_url}/api/workflows/${record.id}`)).json();
+      assert.equal(served.id, record.id);
+      assert.equal(fs.existsSync(path.join(home, "different")), false);
+
+      const reused = status(home, args);
+      assert.equal(reused.ui.server_pid, recovered.ui.server_pid);
+      assert.equal(reused.ui.url, recovered.ui.url);
+      assert.equal(reused.events.length, recovered.events.length + 1);
+      assert.deepStrictEqual(withoutUi(reused), withoutUi(record));
+    } finally {
+      await cleanupServer(metaPath);
+    }
+  });
+});
+
+test("ordinary status and --no-ui leave a stopped dashboard and journal untouched", async () => {
+  await withCodexHome(async (home) => {
+    const record = await fixture(home);
+    const metaPath = metadataPathForRunsDir(path.dirname(record.state_path));
+    try {
+      const server = await ensureUiServer(path.dirname(record.state_path));
+      record.ui = { status: "ready", url: `${server.url}/stale`, server_pid: server.pid };
+      fs.writeFileSync(record.state_path, JSON.stringify(record));
+      await stop(server.pid);
+      const journal = fs.readFileSync(record.state_path, "utf8");
+      const metadata = fs.existsSync(metaPath) ? fs.readFileSync(metaPath, "utf8") : null;
+      for (const flags of [[], ["--no-ui"], ["--ui", "--no-ui"]]) {
+        assert.deepStrictEqual(status(home, ["--state-path", record.state_path, ...flags]), record);
+        assert.equal(fs.readFileSync(record.state_path, "utf8"), journal);
+        assert.equal(fs.existsSync(metaPath) ? fs.readFileSync(metaPath, "utf8") : null, metadata);
+      }
+    } finally {
+      await cleanupServer(metaPath);
+    }
+  });
+});
+
+test("status --ui with no workflow does not start a dashboard", async () => {
+  await withCodexHome(async (home) => {
+    const stateDir = path.join(home, "empty");
+    assert.equal(status(home, ["--state-dir", stateDir, "--ui"]).status, "missing");
+    const missing = childProcess.spawnSync(process.execPath, [CLI, "status", "--ui",
+      "--state-path", path.join(stateDir, "runs", "missing.json")], {
+      cwd: home, encoding: "utf8",
+      env: { ...process.env, CODEX_CLI_PATH: MOCK, ULTRACODE_NO_AUTO_UPDATE: "1" }
+    });
+    assert.equal(missing.status, 1);
+    assert.match(missing.stderr, /ENOENT/);
+    assert.equal(fs.existsSync(stateDir), false);
+  });
+});
+
+test("status --ui persists failure without a stale URL when startup metadata has no healthy server", async () => {
+  await withCodexHome(async (home) => {
+    const record = await fixture(home);
+    record.ui = { status: "ready", url: "http://stale.invalid/workflow/old" };
+    fs.writeFileSync(record.state_path, JSON.stringify(record));
+    // Simulate a server publishing metadata before failing readiness. No real child is spawned.
+    const preload = path.join(home, "unhealthy-server.cjs");
+    fs.writeFileSync(preload, `
+      const fs = require('node:fs');
+      require('node:child_process').spawn = (exe, args, options) => {
+        if (!args[0].endsWith('ultracode-ui-server.js')) throw new Error('Unexpected worker invocation');
+        fs.writeFileSync(options.env.ULTRACODE_UI_META_PATH, JSON.stringify({
+          url: 'http://127.0.0.1:1', pid: process.pid, runs_dir: options.env.ULTRACODE_UI_RUNS_DIR
+        }));
+        return { unref() {}, kill() {} };
+      };
+    `);
+    const failed = status(home, ["--state-path", record.state_path, "--ui"], preload);
+    assert.equal(failed.ui.status, "failed");
+    assert.equal(failed.ui.url, undefined);
+    assert.equal(failed.events.at(-1).type, "ui.failed");
+    assert.equal(failed.events.some((event) => event.type === "ui.ready"), false);
+    assert.deepStrictEqual(withoutUi(failed), withoutUi(record));
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(record.state_path)), failed);
+  });
+});
+
+test("status --ui preserves controller completion journaled during dashboard startup", async () => {
+  await withCodexHome(async (home) => {
+    const completed = await fixture(home);
+    completed.workers[0].result = { answer: "new terminal result" };
+    const running = JSON.parse(JSON.stringify(completed));
+    running.status = "running";
+    running.workers[0].status = "running";
+    running.workers[0].result = null;
+    fs.writeFileSync(completed.state_path, JSON.stringify(running));
+    const preload = path.join(home, "complete-during-ui-start.cjs");
+    fs.writeFileSync(preload, `
+      const fs = require('node:fs');
+      const cp = require('node:child_process');
+      const spawn = cp.spawn;
+      cp.spawn = (exe, args, options) => {
+        if (!args[0].endsWith('ultracode-ui-server.js')) throw new Error('Unexpected worker invocation');
+        fs.writeFileSync(${JSON.stringify(completed.state_path)}, ${JSON.stringify(JSON.stringify(completed))});
+        return spawn(exe, args, options);
+      };
+    `);
+    try {
+      const recovered = status(home, ["--state-path", completed.state_path, "--ui"], preload);
+      assert.deepStrictEqual(JSON.parse(fs.readFileSync(completed.state_path)), completed,
+        "status must not overwrite the active controller's final journal");
+      assert.deepStrictEqual(withoutUi(recovered), withoutUi(completed),
+        "return the newest workflow results alongside the recovered dashboard");
+      assert.equal(recovered.ui.status, "ready");
+      assert.equal(recovered.events.at(-1).type, "ui.ready");
+    } finally {
+      await cleanupServer(metadataPathForRunsDir(path.dirname(completed.state_path)));
+    }
+  });
+});

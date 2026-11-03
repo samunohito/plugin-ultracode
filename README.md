@@ -157,3 +157,31 @@ node scripts/ultracode-cli.js status --state-path /absolute/path/to/runs/RUN_ID.
 
 An explicit `--state-path` works from another cwd and binds writes and dashboard
 lookup to the opened journal's root, including legacy or copied journals.
+
+## Launcher initialization and dashboard recovery
+
+For an installed plugin, resolve `../../scripts/ultracode-cli.js` relative to the
+directory containing its `skills/ultracode/SKILL.md`, then invoke the absolute path
+with `node`. An `ultracode` command on PATH is not required.
+
+If worker stderr pairs `failed to open memories db at .../memories_1.sqlite` with
+`failed to initialize in-process app-server client: Read-only file system (os error 30)`,
+the parent sandbox may be blocking Codex initialization. If needed and allowed,
+use host-approved escalation (`require_escalated`) for the Ultracode launcher,
+while keeping worker `--sandbox read-only` (or its explicitly requested sandbox).
+The diagnostic preserves original stderr and does not change permissions,
+configuration, or authentication, or automatically retry escalation. Never copy
+auth to tmp or overwrite `CODEX_HOME`. Arbitrary read-only project writes,
+authentication errors, and general permission errors require their own diagnosis.
+
+If the dashboard server stops, reopen the existing journal without executing workers:
+
+```sh
+node /absolute/plugin/root/scripts/ultracode-cli.js status --ui --state-path /absolute/path/to/runs/RUN_ID.json
+```
+
+This starts or reuses the dashboard; `resume` can execute workers and is unnecessary
+for UI recovery. Use the returned `record.ui.url`. Check `record.ui.server_url + "/api/health"` from
+the launcher host for server health, then check access in the intended browser.
+A stored URL, `ui.ready`, or host health check alone does not prove browser
+reachability. Do not infer why an old server stopped without evidence.

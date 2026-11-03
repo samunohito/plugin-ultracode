@@ -65,6 +65,38 @@ test("failure: exit!=0 => failed, error contains stderr, usage still accounted",
   assert.strictEqual(ctx.usageTotals.output_tokens, 5);
 });
 
+test("memories db read-only initialization failure adds launcher guidance without changing stderr or retrying", async () => {
+  const stderr = "failed to open memories db at /home/osamu/.codex/memories_1.sqlite\n" +
+    "Error: failed to initialize in-process app-server client: Read-only file system (os error 30).\n";
+  const ctx = createContext({ concurrency: 1 });
+  const r = await withMockEnv({ MOCK_CODEX_EXIT: "1", MOCK_CODEX_STDERR: stderr },
+    () => spawnWorker("prompt", { ...mockOpts(), ctx }));
+  assert.strictEqual(r.status, "failed");
+  assert.ok(r.error.includes(stderr.trim()), "original stderr remains in the error");
+  assert.strictEqual(r.codex_exec.stderr, stderr, "raw stderr is preserved verbatim");
+  assert.match(r.error, /parent sandbox/i);
+  assert.match(r.error, /host-approved.*require_escalated/i);
+  assert.match(r.error, /keep.*--sandbox read-only/i);
+  assert.match(r.error, /never copy auth.*CODEX_HOME/i);
+  assert.strictEqual(ctx.spawnedCount, 1, "diagnostic must not retry or escalate");
+});
+
+test("unrelated read-only, authentication and permission failures get no launcher guidance", async () => {
+  const memories = "failed to open memories db at /home/osamu/.codex/memories_1.sqlite\n";
+  for (const stderr of [
+    "Error: writing /project/output.json: Read-only file system (os error 30).",
+    memories + "Error: failed to initialize in-process app-server client: Permission denied (os error 13).",
+    memories + "Error: failed to initialize in-process app-server client: Authentication required.",
+    memories + "Error: writing /project/output.json: Read-only file system (os error 30).",
+    "Error: failed to initialize in-process app-server client: Read-only file system (os error 30)."
+  ]) {
+    const r = await withMockEnv({ MOCK_CODEX_EXIT: "1", MOCK_CODEX_STDERR: stderr },
+      () => spawnWorker("prompt", mockOpts()));
+    assert.strictEqual(r.status, "failed");
+    assert.strictEqual(r.error, `Codex worker exited with ${stderr}.`);
+  }
+});
+
 test("budget cap: second worker fails with 'token budget exhausted'", async () => {
   const usage = { input_tokens: 100, cached_input_tokens: 0, output_tokens: 0, reasoning_output_tokens: 0 };
   const results = await withMockEnv({ MOCK_CODEX_USAGE: JSON.stringify(usage) }, async () => {

@@ -2,6 +2,7 @@
 "use strict";
 
 const engine = require("./ultracode-engine");
+const { attachWorkflowUi } = require("./ultracode-ui-launcher");
 const fs = require("fs/promises");
 const path = require("path");
 const os = require("os");
@@ -448,6 +449,29 @@ async function main() {
     result = await runCancellable(engine.resumeWorkflow, options);
   } else if (command === "status") {
     result = await engine.readWorkflow(options);
+    if (options.ui === true && result.status !== "missing" && result.state_path) {
+      const initialSnapshot = JSON.stringify(result);
+      const initiallyRunning = result.status === "running";
+      const uiEvents = [];
+      await attachWorkflowUi(result, { events: uiEvents, onEvent: options.on_event }, options);
+      const ui = result.ui;
+      // Startup can outlast controller progress or even completion. Return the
+      // newest results, and leave journals owned by an active controller alone.
+      result = await engine.readWorkflow({ state_path: result.state_path });
+      const mayPersist = !initiallyRunning && result.status !== "running" &&
+        JSON.stringify(result) === initialSnapshot;
+      result.ui = ui;
+      result.events = [...(result.events || []), ...uiEvents];
+      if (mayPersist) {
+        const tempPath = `${result.state_path}.${process.pid}.tmp`;
+        try {
+          await fs.writeFile(tempPath, `${JSON.stringify(result, null, 2)}\n`, "utf8");
+          await fs.rename(tempPath, result.state_path);
+        } finally {
+          await fs.rm(tempPath, { force: true });
+        }
+      }
+    }
   } else if (command === "workflow") {
     result = await workflowCommand(options);
   } else {

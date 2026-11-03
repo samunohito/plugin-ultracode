@@ -4,8 +4,10 @@ Lookup material — flags, step fields, primitive signatures. The *decision* gui
 Ultracode, which surface, which pattern) lives in `../SKILL.md`; runnable end-to-end examples live in
 `cookbook.md`. Read this when you already know what you're building and need the exact flag or field.
 
-Run as `node scripts/ultracode-cli.js <input> [--flags]` from the plugin checkout, or use the absolute
-`scripts/ultracode-cli.js` path inside the installed plugin cache. There is **one** execution command with **no
+Run as `node scripts/ultracode-cli.js <input> [--flags]` from the plugin checkout. From an installed skill,
+resolve `../../scripts/ultracode-cli.js` relative to the directory containing `SKILL.md`
+(`skills/ultracode/`) and invoke that absolute path with `node` from the workflow cwd. Do not assume an
+`ultracode` executable is on PATH. There is **one** execution command with **no
 leading verb** — the input selects what runs (below). The lifecycle/library verbs (`resume`, `status`,
 `workflow`) still take a leading verb. Add `--progress` to stream events to stderr.
 `--workers-spec`, `--steps`, `--force-steps`, and `--args` take JSON; numeric flags are coerced; engine options
@@ -42,6 +44,34 @@ The unified execution command and `resume` launch the local React dashboard by d
 as a `ui.ready` event. Disable it with `--no-ui` or `ULTRACODE_UI=0`. Optional UI flags: `--ui true|false`,
 `--ui-host <host>`, and `--ui-port <port>` (default host `127.0.0.1`, port `0`). The dashboard serves checked-in
 assets from the plugin cache and reads the same journal files as `status`; it does not require `npm install`.
+
+### Launcher initialization failure
+
+The paired diagnostics `failed to open memories db at .../memories_1.sqlite` and
+`failed to initialize in-process app-server client: Read-only file system (os error 30)` can mean
+the parent sandbox prevents Codex initialization in its existing home. If necessary and permitted by the
+host, launch `node /absolute/plugin/root/scripts/ultracode-cli.js ...` with host-approved escalation
+(`require_escalated` in Codex's launcher tool). Keep worker `--sandbox read-only`, or the sandbox explicitly
+requested for that worker. Launcher approval does not require weakening the worker sandbox.
+Ultracode adds guidance while preserving stderr; it does not change permissions, configuration, or auth,
+and does not automatically retry escalation. Never copy auth to tmp or overwrite `CODEX_HOME` to bypass this.
+General permission/authentication errors and read-only project writes do not establish this diagnosis.
+
+### Recovering a stopped dashboard
+
+Use the existing journal to start or reuse its dashboard without executing workers:
+
+```bash
+node /absolute/plugin/root/scripts/ultracode-cli.js status --ui --state-path /absolute/path/to/runs/RUN_ID.json
+```
+
+Use the returned `record.ui.url`. `status` without `--ui` only inspects the journal; `resume` may execute
+workers and is not needed for UI recovery. For an active or concurrently updated run, fresh UI metadata is
+returned without overwriting the controller's journal. Unchanged settled journals retain the recovered UI metadata.
+A stopped server's exact cause remains unknown without evidence.
+Check `record.ui.server_url + "/api/health"` from the launcher host to establish server health, then open the URL in the intended
+browser to check browser reachability. Browser networking can differ from the launcher host's networking;
+a stored URL, `ui.ready` event, or successful host health check alone does not prove the browser can reach it.
 
 ### Canonical invocations
 

@@ -1004,7 +1004,19 @@ function spawnCodex({ bin, args, cwd, env, prompt, timeoutMs, onStreamEvent, sig
       }
       if (code !== 0) {
         const detail = stderr.trim() || stdout.trim() || exitSignal || `exit code ${code}`;
-        finish(new Error(`Codex worker exited with ${detail}.`), code, exitSignal);
+        // Match the paired Codex initialization diagnostics, not arbitrary
+        // read-only project writes or general permission/authentication errors.
+        const launcherBlocked =
+          /failed to open memories db at [^\r\n]*[/\\]memories_\d+\.sqlite\b/i.test(stderr) &&
+          /failed to initialize in-process app-server client: Read-only file system \(os error 30\)/i.test(stderr);
+        const guidance = launcherBlocked
+          ? "\nCodex initialization may be blocked by the parent sandbox around the Ultracode launcher. " +
+            "If necessary, launch scripts/ultracode-cli.js with host-approved escalation (require_escalated) " +
+            "while keeping the worker --sandbox read-only (or its explicitly requested sandbox). " +
+            "Never copy auth to tmp or overwrite CODEX_HOME; preserve the existing authentication/configuration home. " +
+            "Ultracode does not escalate or retry automatically for this diagnostic."
+          : "";
+        finish(new Error(`Codex worker exited with ${detail}.${guidance}`), code, exitSignal);
         return;
       }
       finish(null, code, exitSignal);
